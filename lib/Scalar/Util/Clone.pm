@@ -12,7 +12,7 @@ our @ISA = qw(Exporter DynaLoader);
 
 our @EXPORT_OK = qw(clone);
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 bootstrap Scalar::Util::Clone $VERSION;
 
@@ -76,7 +76,7 @@ For a slower, but more flexible solution see Storable's C<dclone>.
 
 =head1 VERSION
 
-0.02
+0.03
 
 =head1 SEE ALSO
 

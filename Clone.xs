@@ -31,31 +31,28 @@
 #define new_HE() new_he()
 #endif
 
-#define CLONE_NEW_SV(sstr, dstr, ptable)				    											\
-STMT_START {								    														\
-	CLONE_DEBUG("    creating new SV\n");																\
-	dstr = newSV(0);						    														\
-	(void)SvUPGRADE(dstr, SvTYPE(sstr));				    											\
-	SvFLAGS(dstr) = SvFLAGS(sstr);					    												\
-	/* don't propagate OOK hack or context-specific flags */	    									\
-	/* SVpad_OUR conflicts with SvWEAKREF */															\
-	/* SvFLAGS(dstr) &= ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVs_TEMP | SVpad_OUR); */				\
-	SvFLAGS(dstr) &= ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);									\
-	SvREFCNT(dstr) = 0; /* must be before any other dups! */	    									\
-	/* TODO */																							\
-	/* SvTAINTED(dstr) = SvTAINTED(sstr);*/																\
-	if ((SvREFCNT(sstr) > 1) || SvWEAKREF(sstr) || SvRMAGICAL(sstr) || SvGMAGICAL(sstr)) {				\
-		/* CLONE_DEBUG("storing sv 0x%x with a refcount of %d\n", sstr, SvREFCNT(sstr)); */				\
-		PTABLE_store(ptable, sstr, dstr);			    												\
-	}																									\
+#define CLONE_NEW_SV(sstr, dstr, ptable) \
+STMT_START { \
+	CLONE_DEBUG("    creating new SV\n"); \
+	dstr = newSV(0); \
+	(void)SvUPGRADE(dstr, SvTYPE(sstr)); \
+	SvFLAGS(dstr) = SvFLAGS(sstr);	\
+	/* don't propagate OOK hack or context-specific flags */ \
+	/* SVpad_OUR conflicts with SvWEAKREF */ \
+	/* SvFLAGS(dstr) &= ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVs_TEMP | SVpad_OUR); */ \
+	SvFLAGS(dstr) &= ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK); \
+	SvREFCNT(dstr) = 0; /* must be before any other dups! */ \
+	/* TODO */ \
+	/* SvTAINTED(dstr) = SvTAINTED(sstr); */ \
+	PTABLE_store(ptable, sstr, dstr); \
 } STMT_END
 
-#define CLONE_PASS_THRU(sstr, dstr, ptable)				    											\
-STMT_START {								    														\
-	CLONE_DEBUG("    returning original sv\n");															\
-	dstr = sstr;																						\
-	/* dstr = SvREFCNT_inc(SvROK(sstr) ? SvRV(dstr) : dstr); */											\
-	PTABLE_store(ptable, sstr, sstr);																	\
+#define CLONE_PASS_THRU(sstr, dstr, ptable) \
+STMT_START { \
+	CLONE_DEBUG("    returning original sv\n"); \
+	dstr = sstr; \
+	/* dstr = SvREFCNT_inc(SvROK(sstr) ? SvRV(dstr) : dstr); */ \
+	PTABLE_store(ptable, sstr, sstr); \
 } STMT_END
 
 #define CLONE_COPY_STASH(sstr, dsrt) (SvSTASH(dstr) = (HV *)SvREFCNT_inc(SvSTASH(sstr)))
@@ -68,8 +65,13 @@ STMT_START {								    														\
 #endif
 #endif
 
-/* the Perl_sharepvn macro is public but references a private function - fix that */
-#define CLONE_SHAREPVN(sv, len, hash) HEK_KEY(Perl_share_hek(sv, len, hash))
+/* the Perl_sharepvn macro is public but references a (possibly) private function - fix that */
+#ifdef share_hek
+#define CLONE_SHAREPVN(sv, len, hash) HEK_KEY(share_hek(aTHX_ sv, len, hash))
+#else
+#define CLONE_SHAREPVN(sv, len, hash) HEK_KEY(Perl_share_hek(aTHX_ sv, len, hash))
+#endif
+
 
 static SV * clone_sv(SV *sstr, PTABLE_t *ptable);
 static void clone_rvpv(SV *sstr, SV *dstr, PTABLE_t *ptable);
@@ -89,7 +91,7 @@ save_hek_flags(const char *str, I32 len, U32 hash, int flags)
 	char *k;
 	register HEK *hek;
 
-	New(54, k, HEK_BASESIZE + len + 2, char);
+	New(0, k, HEK_BASESIZE + len + 2, char);
 	hek = (HEK*)k;
 	Copy(str, HEK_KEY(hek), len, char);
 	HEK_KEY(hek)[len] = 0;
@@ -152,7 +154,7 @@ share_hek_flags(const char *str, I32 len, register U32 hash, int flags)
 	 */
 
 	if (!found)
-		Perl_croak("can't find shared key in string table");
+		Perl_croak(aTHX_ "can't find shared key in string table");
 
 	return HeKEY_hek(entry);
 }
@@ -176,7 +178,7 @@ more_he(void)
 	register HE* he;
 	register HE* heend;
 	XPV *ptr;
-	New(54, ptr, 1008 / sizeof(XPV), XPV);
+	New(0, ptr, 1008 / sizeof(XPV), XPV);
 	ptr->xpv_pv = (char*)PL_he_arenaroot;
 	PL_he_arenaroot = ptr;
 
@@ -211,7 +213,7 @@ clone_he(HE *e, bool shared, PTABLE_t * ptable)
 
 	if (HeKLEN(e) == HEf_SVKEY) {
 		char *k;
-		New(54, k, HEK_BASESIZE + sizeof(SV*), char);
+		New(0, k, HEK_BASESIZE + sizeof(SV*), char);
 		HeKEY_hek(ret) = (HEK*)k;
 		HeKEY_sv(ret) = SvREFCNT_inc(clone_sv(HeKEY_sv(e), ptable));
 	} else if (shared) {
@@ -631,7 +633,7 @@ clone_sv(SV *sstr, PTABLE_t *ptable)
 			CLONE_PASS_THRU(sstr, dstr, ptable);
 			break;
 		default:
-			Perl_croak("Bizarre SvTYPE [%" IVdf "]", (IV)SvTYPE(sstr));
+			Perl_croak(aTHX_ "Bizarre SvTYPE [%" IVdf "]", (IV)SvTYPE(sstr));
 			break;
 	}
 
@@ -661,8 +663,7 @@ clone(original)
     ptable = NULL;
 
     EXTEND(SP,1);
-    /* PUSHs(sv_2mortal(SvREFCNT_inc(clone))); */
-    PUSHs(clone);
+    PUSHs(sv_2mortal(SvREFCNT_inc(clone)));
 
 void
 supports_weakrefs()
