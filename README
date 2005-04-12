@@ -1,4 +1,4 @@
-Scalar::Util::Clone version 0.01
+Scalar::Util::Clone version 0.02
 ================================
 
 Scalar::Util::Clone - recursively copy datatypes using perl's builtin functions
@@ -32,7 +32,7 @@ This module's test suite has the following dependency:
 
 COPYRIGHT AND LICENCE
 
-Copyright (C) 2005 chocolateboy <chocolate.boy@email.com>
+Copyright (c) 2005 chocolateboy <chocolate.boy@email.com>
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself. 

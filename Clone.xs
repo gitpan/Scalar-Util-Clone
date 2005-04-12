@@ -4,12 +4,14 @@
 #include "ppport.h"
 #include "regcomp.h"
 
+#include "ptable.h"
+
 /*
 
    The clone_foo() functions make an exact copy of an existing foo thingy.
    During the course of a cloning, a hash table is used to map old addresses
    to new addresses. The table is created and manipulated with the
-   ptr_table_* functions.
+   PTABLE_* functions.
 
 */
 
@@ -20,7 +22,6 @@
 #define SAVEPV(p) (p ? savepv(p) : Nullch)
 #define SAVEPVN(p,n) (p ? savepvn(p,n) : Nullch)
 
-/* PerlIO_printf(PerlIO_stderr(), ...) */
 /* #define CLONE_DEBUG Perl_warn */
 #define CLONE_DEBUG(...)
 
@@ -30,10 +31,10 @@
 #define new_HE() new_he()
 #endif
 
-#define CLONE_NEW_SV(sstr, dstr, ptr_table)				    											\
+#define CLONE_NEW_SV(sstr, dstr, ptable)				    											\
 STMT_START {								    														\
 	CLONE_DEBUG("    creating new SV\n");																\
-	dstr = Perl_newSV(0);						    													\
+	dstr = newSV(0);						    														\
 	(void)SvUPGRADE(dstr, SvTYPE(sstr));				    											\
 	SvFLAGS(dstr) = SvFLAGS(sstr);					    												\
 	/* don't propagate OOK hack or context-specific flags */	    									\
@@ -43,15 +44,18 @@ STMT_START {								    														\
 	SvREFCNT(dstr) = 0; /* must be before any other dups! */	    									\
 	/* TODO */																							\
 	/* SvTAINTED(dstr) = SvTAINTED(sstr);*/																\
-	ptr_table_store(ptr_table, sstr, dstr);			    												\
+	if ((SvREFCNT(sstr) > 1) || SvWEAKREF(sstr) || SvRMAGICAL(sstr) || SvGMAGICAL(sstr)) {				\
+		/* CLONE_DEBUG("storing sv 0x%x with a refcount of %d\n", sstr, SvREFCNT(sstr)); */				\
+		PTABLE_store(ptable, sstr, dstr);			    												\
+	}																									\
 } STMT_END
 
-#define CLONE_PASS_THRU(sstr, dstr, ptr_table)				    										\
+#define CLONE_PASS_THRU(sstr, dstr, ptable)				    											\
 STMT_START {								    														\
 	CLONE_DEBUG("    returning original sv\n");															\
 	dstr = sstr;																						\
 	/* dstr = SvREFCNT_inc(SvROK(sstr) ? SvRV(dstr) : dstr); */											\
-	ptr_table_store(ptr_table, sstr, sstr);																\
+	PTABLE_store(ptable, sstr, sstr);																	\
 } STMT_END
 
 #define CLONE_COPY_STASH(sstr, dsrt) (SvSTASH(dstr) = (HV *)SvREFCNT_inc(SvSTASH(sstr)))
@@ -67,34 +71,15 @@ STMT_START {								    														\
 /* the Perl_sharepvn macro is public but references a private function - fix that */
 #define CLONE_SHAREPVN(sv, len, hash) HEK_KEY(Perl_share_hek(sv, len, hash))
 
-#if (PTRSIZE == 8)
-#define PTR_TABLE_HASH(ptr) (PTR2UV(ptr) >> 3)
-#else
-#define PTR_TABLE_HASH(ptr) (PTR2UV(ptr) >> 2)
-#endif
-
-#ifdef PURIFY
-#define new_HE() (HE*)safemalloc(sizeof(HE))
-#else
-#define new_HE() new_he()
-#endif
-
-static SV * clone_sv(SV *sstr, PTR_TBL_t *ptr_table);
-static void clone_rvpv(SV *sstr, SV *dstr, PTR_TBL_t *ptr_table);
-static REGEXP *clone_re(REGEXP *r, PTR_TBL_t *ptr_table);
-static MAGIC * clone_mg(MAGIC *mg, PTR_TBL_t *ptr_table);
-
-static PTR_TBL_t * ptr_table_new();
-static void * ptr_table_fetch(PTR_TBL_t *tbl, void *sv);
-static void ptr_table_store(PTR_TBL_t *tbl, void *oldv, void *newv);
-static void ptr_table_grow(PTR_TBL_t *tbl);
-static void ptr_table_clear(PTR_TBL_t *tbl);
-static void ptr_table_free(PTR_TBL_t *tbl);
+static SV * clone_sv(SV *sstr, PTABLE_t *ptable);
+static void clone_rvpv(SV *sstr, SV *dstr, PTABLE_t *ptable);
+static REGEXP *clone_re(REGEXP *r, PTABLE_t *ptable);
+static MAGIC * clone_mg(MAGIC *mg, PTABLE_t *ptable);
 
 static HE* new_he(void);
 static void more_he(void);
 static HEK * save_hek_flags(const char *str, I32 len, U32 hash, int flags);
-static HE * clone_he(HE *e, bool shared, PTR_TBL_t * ptr_table);
+static HE * clone_he(HE *e, bool shared, PTABLE_t * ptable);
 static HEK * share_hek_flags(const char *str, I32 len, register U32 hash, int flags);
 
 static HEK *
@@ -206,7 +191,7 @@ more_he(void)
 }
 
 static HE *
-clone_he(HE *e, bool shared, PTR_TBL_t * ptr_table)
+clone_he(HE *e, bool shared, PTABLE_t * ptable)
 {
 	HE *ret;
 
@@ -214,177 +199,36 @@ clone_he(HE *e, bool shared, PTR_TBL_t * ptr_table)
 		return Nullhe;
 
 	/* look for it in the table first */
-	ret = (HE*)ptr_table_fetch(ptr_table, e);
+	ret = (HE*)PTABLE_fetch(ptable, e);
 
 	if (ret)
 		return ret;
 
 	/* create anew and remember what it is */
 	ret = new_HE();
-	ptr_table_store(ptr_table, e, ret);
-	HeNEXT(ret) = clone_he(HeNEXT(e), shared, ptr_table);
+	PTABLE_store(ptable, e, ret);
+	HeNEXT(ret) = clone_he(HeNEXT(e), shared, ptable);
 
 	if (HeKLEN(e) == HEf_SVKEY) {
 		char *k;
 		New(54, k, HEK_BASESIZE + sizeof(SV*), char);
 		HeKEY_hek(ret) = (HEK*)k;
-		HeKEY_sv(ret) = SvREFCNT_inc(clone_sv(HeKEY_sv(e), ptr_table));
+		HeKEY_sv(ret) = SvREFCNT_inc(clone_sv(HeKEY_sv(e), ptable));
 	} else if (shared) {
 		HeKEY_hek(ret) = share_hek_flags(HeKEY(e), HeKLEN(e), HeHASH(e), HeKFLAGS(e));
 	} else {
 		HeKEY_hek(ret) = save_hek_flags(HeKEY(e), HeKLEN(e), HeHASH(e), HeKFLAGS(e));
 	}
 
-	HeVAL(ret) = SvREFCNT_inc(clone_sv(HeVAL(e), ptr_table));
+	HeVAL(ret) = SvREFCNT_inc(clone_sv(HeVAL(e), ptable));
 	return ret;
-}
-
-/* create a new pointer-mapping table */
-
-static PTR_TBL_t *
-ptr_table_new()
-{
-	PTR_TBL_t *tbl;
-	Newz(0, tbl, 1, PTR_TBL_t);
-	tbl->tbl_max = 511;
-	tbl->tbl_items = 0;
-	Newz(0, tbl->tbl_ary, tbl->tbl_max + 1, PTR_TBL_ENT_t*);
-	return tbl;
-}
-
-/* map an existing pointer using a table */
-
-static void *
-ptr_table_fetch(PTR_TBL_t *tbl, void *sv)
-{
-	PTR_TBL_ENT_t *tblent;
-	UV hash = PTR_TABLE_HASH(sv);
-	tblent = tbl->tbl_ary[hash & tbl->tbl_max];
-	for (; tblent; tblent = tblent->next) {
-		if (tblent->oldval == sv) {
-			CLONE_DEBUG("    found value in ptr_table: 0x%x => 0x%x\n", sv, tblent->newval);
-			return tblent->newval;
-		}
-	}
-	return (void*)NULL;
-}
-
-/* add a new entry to a pointer-mapping table */
-
-static void
-ptr_table_store(PTR_TBL_t *tbl, void *oldv, void *newv)
-{
-	PTR_TBL_ENT_t *tblent, **otblent;
-	/* XXX this may be pessimal on platforms where pointers aren't good
-	 * hash values e.g. if they grow faster in the most significant
-	 * bits */
-	UV hash = PTR_TABLE_HASH(oldv);
-	bool empty = 1;
-	CLONE_DEBUG("    storing value in ptr_table: 0x%x => 0x%x\n", oldv, newv);
-
-	otblent = &tbl->tbl_ary[hash & tbl->tbl_max];
-	for (tblent = *otblent; tblent; empty=0, tblent = tblent->next) {
-		if (tblent->oldval == oldv) {
-			tblent->newval = newv;
-			return;
-		}
-	}
-	Newz(0, tblent, 1, PTR_TBL_ENT_t);
-	tblent->oldval = oldv;
-	tblent->newval = newv;
-	tblent->next = *otblent;
-	*otblent = tblent;
-	tbl->tbl_items++;
-	if (!empty && tbl->tbl_items > tbl->tbl_max)
-		ptr_table_grow(tbl);
-}
-
-/* double the hash bucket size of an existing ptr table */
-
-static void
-ptr_table_grow(PTR_TBL_t *tbl)
-{
-	PTR_TBL_ENT_t **ary = tbl->tbl_ary;
-	UV oldsize = tbl->tbl_max + 1;
-	UV newsize = oldsize * 2;
-	UV i;
-
-	Renew(ary, newsize, PTR_TBL_ENT_t*);
-	Zero(&ary[oldsize], newsize-oldsize, PTR_TBL_ENT_t*);
-	tbl->tbl_max = --newsize;
-	tbl->tbl_ary = ary;
-	for (i=0; i < oldsize; i++, ary++) {
-		PTR_TBL_ENT_t **curentp, **entp, *ent;
-		if (!*ary)
-			continue;
-		curentp = ary + oldsize;
-		for (entp = ary, ent = *ary; ent; ent = *entp) {
-			if ((newsize & PTR_TABLE_HASH(ent->oldval)) != i) {
-				*entp = ent->next;
-				ent->next = *curentp;
-				*curentp = ent;
-				continue;
-			}
-			else
-				entp = &ent->next;
-		}
-	}
-}
-
-/* remove all the entries from a ptr table */
-
-static void
-ptr_table_clear(PTR_TBL_t *tbl)
-{
-	register PTR_TBL_ENT_t **array;
-	register PTR_TBL_ENT_t *entry;
-	register PTR_TBL_ENT_t *oentry = Null(PTR_TBL_ENT_t*);
-	UV riter = 0;
-	UV max;
-
-	if (!tbl || !tbl->tbl_items) {
-		return;
-	}
-
-	array = tbl->tbl_ary;
-	entry = array[0];
-	max = tbl->tbl_max;
-
-	for (;;) {
-		if (entry) {
-			oentry = entry;
-			entry = entry->next;
-			Safefree(oentry);
-		}
-		if (!entry) {
-			if (++riter > max) {
-				break;
-			}
-			entry = array[riter];
-		}
-	}
-
-	tbl->tbl_items = 0;
-}
-
-/* clear and free a ptr table */
-
-static void
-ptr_table_free(PTR_TBL_t *tbl)
-{
-	if (!tbl) {
-		return;
-	}
-	ptr_table_clear(tbl);
-	Safefree(tbl->tbl_ary);
-	Safefree(tbl);
 }
 
 /* Duplicate a regexp. Required reading: pregcomp() and pregfree() in
    regcomp.c. AMS 20010712 */
 
 static REGEXP *
-clone_re(REGEXP *r, PTR_TBL_t *ptr_table)
+clone_re(REGEXP *r, PTABLE_t *ptable)
 {
 	REGEXP *ret;
 	int i, len, npar;
@@ -394,7 +238,7 @@ clone_re(REGEXP *r, PTR_TBL_t *ptr_table)
 	if (!r)
 		return (REGEXP *)NULL;
 
-	if ((ret = (REGEXP *)ptr_table_fetch(ptr_table, r)))
+	if ((ret = (REGEXP *)PTABLE_fetch(ptable, r)))
 		return ret;
 
 	len = r->offsets[0];
@@ -412,8 +256,8 @@ clone_re(REGEXP *r, PTR_TBL_t *ptr_table)
 	for (s = ret->substrs->data, i = 0; i < 3; i++, s++) {
 		s->min_offset = r->substrs->data[i].min_offset;
 		s->max_offset = r->substrs->data[i].max_offset;
-		s->substr = clone_sv_inc(r->substrs->data[i].substr, ptr_table);
-		s->utf8_substr = clone_sv_inc(r->substrs->data[i].utf8_substr, ptr_table);
+		s->substr = clone_sv_inc(r->substrs->data[i].substr, ptable);
+		s->utf8_substr = clone_sv_inc(r->substrs->data[i].utf8_substr, ptable);
 	}
 
 	ret->regstclass = NULL;
@@ -430,10 +274,10 @@ clone_re(REGEXP *r, PTR_TBL_t *ptr_table)
 			d->what[i] = r->data->what[i];
 			switch (d->what[i]) {
 				case 's':
-					d->data[i] = clone_sv_inc((SV *)r->data->data[i], ptr_table);
+					d->data[i] = clone_sv_inc((SV *)r->data->data[i], ptable);
 					break;
 				case 'p':
-					d->data[i] = clone_av_inc((AV *)r->data->data[i], ptr_table);
+					d->data[i] = clone_av_inc((AV *)r->data->data[i], ptable);
 					break;
 				case 'f':
 					/* This is cheating. */
@@ -476,14 +320,14 @@ clone_re(REGEXP *r, PTR_TBL_t *ptr_table)
 	else
 		ret->subbeg = Nullch;
 
-	ptr_table_store(ptr_table, r, ret);
+	PTABLE_store(ptable, r, ret);
 	return ret;
 }
 
 /* duplicate a chain of magic */
 
 static MAGIC *
-clone_mg(MAGIC *mg, PTR_TBL_t *ptr_table)
+clone_mg(MAGIC *mg, PTABLE_t *ptable)
 {
 	MAGIC *mgprev = (MAGIC*)NULL;
 	MAGIC *mgret;
@@ -494,7 +338,7 @@ clone_mg(MAGIC *mg, PTR_TBL_t *ptr_table)
 		return (MAGIC*)NULL;
 
 	/* look for it in the table first */
-	mgret = (MAGIC*)ptr_table_fetch(ptr_table, mg);
+	mgret = (MAGIC*)PTABLE_fetch(ptable, mg);
 
 	if (mgret)
 		return mgret;
@@ -515,7 +359,7 @@ clone_mg(MAGIC *mg, PTR_TBL_t *ptr_table)
 		nmg->mg_flags	= mg->mg_flags;
 
 		if (mg->mg_type == PERL_MAGIC_qr) {
-			nmg->mg_obj	= (SV*)clone_re((REGEXP*)mg->mg_obj, ptr_table);
+			nmg->mg_obj	= (SV*)clone_re((REGEXP*)mg->mg_obj, ptable);
 		} else if (mg->mg_type == WEAKREF_IDENTIFIER) {
 			AV *av = (AV*) mg->mg_obj;
 			SV **svp;
@@ -524,12 +368,12 @@ clone_mg(MAGIC *mg, PTR_TBL_t *ptr_table)
 			svp = AvARRAY(av);
 			for (i = AvFILLp(av); i >= 0; --i) {
 				if (!svp[i]) continue;
-				av_push((AV*)nmg->mg_obj,clone_sv(svp[i], ptr_table));
+				av_push((AV*)nmg->mg_obj,clone_sv(svp[i], ptable));
 			}
 		} else {
 			nmg->mg_obj	= (mg->mg_flags & MGf_REFCOUNTED)
-				? clone_sv_inc(mg->mg_obj, ptr_table)
-				: clone_sv(mg->mg_obj, ptr_table);
+				? clone_sv_inc(mg->mg_obj, ptable)
+				: clone_sv(mg->mg_obj, ptable);
 		}
 		nmg->mg_len = mg->mg_len;
 		nmg->mg_ptr = mg->mg_ptr; /* XXX random ptr? */
@@ -542,11 +386,11 @@ clone_mg(MAGIC *mg, PTR_TBL_t *ptr_table)
 					AMT *namtp = (AMT*)nmg->mg_ptr;
 					I32 i;
 					for (i = 1; i < NofAMmeth; i++) {
-						namtp->table[i] = clone_cv_inc(amtp->table[i], ptr_table);
+						namtp->table[i] = clone_cv_inc(amtp->table[i], ptable);
 					}
 				}
 			} else if (mg->mg_len == HEf_SVKEY) {
-				nmg->mg_ptr	= (char*)clone_sv_inc((SV*)mg->mg_ptr, ptr_table);
+				nmg->mg_ptr	= (char*)clone_sv_inc((SV*)mg->mg_ptr, ptable);
 			}
 		}
 
@@ -564,11 +408,11 @@ clone_mg(MAGIC *mg, PTR_TBL_t *ptr_table)
 }
 
 static void
-clone_rvpv(SV *sstr, SV *dstr, PTR_TBL_t *ptr_table)
+clone_rvpv(SV *sstr, SV *dstr, PTABLE_t *ptable)
 {
 	CLONE_DEBUG("inside clone_rvpv\n");
 	if (SvROK(sstr)) {
-		SvRV(dstr) = SvWEAKREF(sstr) ? clone_sv(SvRV(sstr), ptr_table) : clone_sv_inc(SvRV(sstr), ptr_table);
+		SvRV(dstr) = SvWEAKREF(sstr) ? clone_sv(SvRV(sstr), ptable) : clone_sv_inc(SvRV(sstr), ptable);
 	} else if (SvPVX(sstr)) {
 		/* Has something there */
 		if (SvLEN(sstr)) {
@@ -594,7 +438,7 @@ clone_rvpv(SV *sstr, SV *dstr, PTR_TBL_t *ptr_table)
 /* duplicate an SV of any type (including AV, HV etc) */
 
 static SV *
-clone_sv(SV *sstr, PTR_TBL_t *ptr_table)
+clone_sv(SV *sstr, PTABLE_t *ptable)
 {
 	SV * dstr;
 
@@ -603,7 +447,7 @@ clone_sv(SV *sstr, PTR_TBL_t *ptr_table)
 		return Nullsv;
 
 	/* look for it in the table first */
-	dstr = (SV*)ptr_table_fetch(ptr_table, sstr);
+	dstr = (SV*)PTABLE_fetch(ptable, sstr);
 
 	if (dstr)
 		return dstr;
@@ -611,111 +455,111 @@ clone_sv(SV *sstr, PTR_TBL_t *ptr_table)
 	switch (SvTYPE(sstr)) {
 		case SVt_NULL:
 			CLONE_DEBUG("    detected type: %s (NULL)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
 			break;
 		case SVt_IV:
 			CLONE_DEBUG("    detected type: %s (IV)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvIVX(dstr) = SvIVX(sstr);
 			break;
 		case SVt_NV:
 			CLONE_DEBUG("    detected type: %s (NV)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvNVX(dstr) = SvNVX(sstr);
 			break;
 		case SVt_RV:
 			CLONE_DEBUG("    detected type: %s (RV)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
-			clone_rvpv(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
+			clone_rvpv(sstr, dstr, ptable);
 			break;
 		case SVt_PV:
 			CLONE_DEBUG("    detected type: %s (PV)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)     = SvCUR(sstr);
 			SvLEN(dstr)     = SvLEN(sstr);
-			clone_rvpv(sstr, dstr, ptr_table);
+			clone_rvpv(sstr, dstr, ptable);
 			break;
 		case SVt_PVIV:
 			CLONE_DEBUG("    detected type: %s (PVIV)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)	= SvCUR(sstr);
 			SvLEN(dstr)	= SvLEN(sstr);
 			SvIVX(dstr)	= SvIVX(sstr);
-			clone_rvpv(sstr, dstr, ptr_table);
+			clone_rvpv(sstr, dstr, ptable);
 			break;
 		case SVt_PVNV:
 			CLONE_DEBUG("    detected type: %s (PVNV)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)	= SvCUR(sstr);
 			SvLEN(dstr)	= SvLEN(sstr);
 			SvIVX(dstr)	= SvIVX(sstr);
 			SvNVX(dstr)	= SvNVX(sstr);
-			clone_rvpv(sstr, dstr, ptr_table);
+			clone_rvpv(sstr, dstr, ptable);
 			break;
 		case SVt_PVMG:
 			CLONE_DEBUG("    detected type: %s (PVMG)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)	= SvCUR(sstr);
 			SvLEN(dstr)	= SvLEN(sstr);
 			SvIVX(dstr)	= SvIVX(sstr);
 			SvNVX(dstr)	= SvNVX(sstr);
-			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptr_table);
+			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptable);
 			CLONE_COPY_STASH(sstr, dstr);
-			clone_rvpv(sstr, dstr, ptr_table);
+			clone_rvpv(sstr, dstr, ptable);
 			break;
 		case SVt_PVBM:
 			CLONE_DEBUG("    detected type: %s (PVBM)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)	= SvCUR(sstr);
 			SvLEN(dstr)	= SvLEN(sstr);
 			SvIVX(dstr)	= SvIVX(sstr);
 			SvNVX(dstr)	= SvNVX(sstr);
-			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptr_table);
+			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptable);
 			CLONE_COPY_STASH(sstr, dstr);
-			clone_rvpv(sstr, dstr, ptr_table);
+			clone_rvpv(sstr, dstr, ptable);
 			BmRARE(dstr) = BmRARE(sstr);
 			BmUSEFUL(dstr) = BmUSEFUL(sstr);
 			BmPREVIOUS(dstr) = BmPREVIOUS(sstr);
 			break;
 		case SVt_PVLV:
 			CLONE_DEBUG("    detected type: %s (PVLV)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr) = SvCUR(sstr);
 			SvLEN(dstr) = SvLEN(sstr);
 			SvIVX(dstr) = SvIVX(sstr);
 			SvNVX(dstr) = SvNVX(sstr);
-			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptr_table);
+			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptable);
 			CLONE_COPY_STASH(sstr, dstr);
-			clone_rvpv(sstr, dstr, ptr_table);
+			clone_rvpv(sstr, dstr, ptable);
 			LvTARGOFF(dstr) = LvTARGOFF(sstr); /* XXX sometimes holds PMOP* when DEBUGGING */
 			LvTARGLEN(dstr) = LvTARGLEN(sstr);
 			if (LvTYPE(sstr) == 't') { /* for tie: unrefcnted fake (SV**) */
 				LvTARG(dstr) = dstr;
 			} else if (LvTYPE(sstr) == 'T') { /* for tie: fake HE */
-				LvTARG(dstr) = (SV*)clone_he((HE*)LvTARG(sstr), 0, ptr_table);
+				LvTARG(dstr) = (SV*)clone_he((HE*)LvTARG(sstr), 0, ptable);
 			} else {
-				LvTARG(dstr) = clone_sv_inc(LvTARG(sstr), ptr_table);
+				LvTARG(dstr) = clone_sv_inc(LvTARG(sstr), ptable);
 			}
 			LvTYPE(dstr) = LvTYPE(sstr);
 			break;
 		case SVt_PVGV:
 			CLONE_DEBUG("    detected type: %s (PVGV)\n", sv_reftype(sstr, 0));
-			CLONE_PASS_THRU(sstr, dstr, ptr_table);
+			CLONE_PASS_THRU(sstr, dstr, ptable);
 			break;
 		case SVt_PVIO:
 			CLONE_DEBUG("    detected type: %s (PVIO)\n", sv_reftype(sstr, 0));
-			CLONE_PASS_THRU(sstr, dstr, ptr_table);
+			CLONE_PASS_THRU(sstr, dstr, ptable);
 			break;
 		case SVt_PVAV:
 			CLONE_DEBUG("    detected type: %s (PVAV)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)	= SvCUR(sstr);
 			SvLEN(dstr)	= SvLEN(sstr);
 			SvIVX(dstr)	= SvIVX(sstr);
 			SvNVX(dstr)	= SvNVX(sstr);
-			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptr_table);
+			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptable);
 			CLONE_COPY_STASH(sstr, dstr);
-			AvARYLEN((AV*)dstr) = clone_sv_inc(AvARYLEN((AV*)sstr), ptr_table);
+			AvARYLEN((AV*)dstr) = clone_sv_inc(AvARYLEN((AV*)sstr), ptable);
 			AvFLAGS((AV*)dstr) = AvFLAGS((AV*)sstr);
 
 			if (AvARRAY((AV*)sstr)) {
@@ -724,15 +568,15 @@ clone_sv(SV *sstr, PTR_TBL_t *ptr_table)
 
 				src_ary = AvARRAY((AV*)sstr);
 				Newz(0, dst_ary, AvMAX((AV*)sstr)+1, SV*);
-				ptr_table_store(ptr_table, src_ary, dst_ary);
+				PTABLE_store(ptable, src_ary, dst_ary);
 				SvPVX(dstr) = (char*)dst_ary;
 				AvALLOC((AV*)dstr) = dst_ary;
 				if (AvREAL((AV*)sstr)) {
 					while (items-- > 0)
-						*dst_ary++ = clone_sv_inc(*src_ary++, ptr_table);
+						*dst_ary++ = clone_sv_inc(*src_ary++, ptable);
 				} else {
 					while (items-- > 0)
-						*dst_ary++ = clone_sv(*src_ary++, ptr_table);
+						*dst_ary++ = clone_sv(*src_ary++, ptable);
 				}
 				items = AvMAX((AV*)sstr) - AvFILLp((AV*)sstr);
 				while (items-- > 0) {
@@ -745,12 +589,12 @@ clone_sv(SV *sstr, PTR_TBL_t *ptr_table)
 			break;
 		case SVt_PVHV:
 			CLONE_DEBUG("    detected type: %s (PVHV)\n", sv_reftype(sstr, 0));
-			CLONE_NEW_SV(sstr, dstr, ptr_table);
+			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr) = SvCUR(sstr);
 			SvLEN(dstr) = SvLEN(sstr);
 			SvIVX(dstr) = SvIVX(sstr);
 			SvNVX(dstr) = SvNVX(sstr);
-			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptr_table);
+			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptable);
 			CLONE_COPY_STASH(sstr, dstr);
 			HvRITER((HV*)dstr) = HvRITER((HV*)sstr);
 			if (HvARRAY((HV*)sstr)) {
@@ -760,11 +604,11 @@ clone_sv(SV *sstr, PTR_TBL_t *ptr_table)
 				Newz(0, dxhv->xhv_array, PERL_HV_ARRAY_ALLOC_BYTES(dxhv->xhv_max+1), char);
 
 				while (i <= sxhv->xhv_max) {
-					((HE**)dxhv->xhv_array)[i] = clone_he(((HE**)sxhv->xhv_array)[i], (bool)!!HvSHAREKEYS(sstr), ptr_table);
+					((HE**)dxhv->xhv_array)[i] = clone_he(((HE**)sxhv->xhv_array)[i], (bool)!!HvSHAREKEYS(sstr), ptable);
 					++i;
 				}
 
-				dxhv->xhv_eiter = clone_he(sxhv->xhv_eiter, (bool)!!HvSHAREKEYS(sstr), ptr_table);
+				dxhv->xhv_eiter = clone_he(sxhv->xhv_eiter, (bool)!!HvSHAREKEYS(sstr), ptable);
 			}
 			
 			/* set by sv_upgrade
@@ -784,7 +628,7 @@ clone_sv(SV *sstr, PTR_TBL_t *ptr_table)
 			CLONE_DEBUG("    detected type: %s (PVFM)\n", sv_reftype(sstr, 0));
 		case SVt_PVCV:
 			CLONE_DEBUG("    detected type: %s (PVCV)\n", sv_reftype(sstr, 0));
-			CLONE_PASS_THRU(sstr, dstr, ptr_table);
+			CLONE_PASS_THRU(sstr, dstr, ptable);
 			break;
 		default:
 			Perl_croak("Bizarre SvTYPE [%" IVdf "]", (IV)SvTYPE(sstr));
@@ -807,14 +651,14 @@ clone(original)
     PROTOTYPE: $
     PREINIT:
     SV *clone = &PL_sv_undef;
-    PTR_TBL_t *ptr_table = NULL;
+    PTABLE_t *ptable = NULL;
     PPCODE:
 
 	CLONE_DEBUG("\n");
-    ptr_table = ptr_table_new(); 
-    clone = clone_sv(original, ptr_table);
-    ptr_table_free(ptr_table);
-    ptr_table = NULL;
+    ptable = PTABLE_new(); 
+    clone = clone_sv(original, ptable);
+    PTABLE_free(ptable);
+    ptable = NULL;
 
     EXTEND(SP,1);
     /* PUSHs(sv_2mortal(SvREFCNT_inc(clone))); */

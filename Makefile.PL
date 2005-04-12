@@ -18,6 +18,6 @@ WriteMakefile(
     'LIBS'            =>    [''],         # e.g. '-lm'
     # 'DEFINE'        =>    '',
     # 'OPTIMIZE'      =>    '-g3 -Wall',
-    'OPTIMIZE'        =>    '-O3',
+    'OPTIMIZE'        =>    '-O3 -Wall',
     'INC'             =>    ''         # e.g. '-I/usr/include/other'
 );

@@ -6,6 +6,7 @@ Makefile.PL
 README
 lib/Scalar/Util/Clone.pm
 ppport.h
+ptable.h
 t/clone.t
 t/coderef.t
 t/hashref.t

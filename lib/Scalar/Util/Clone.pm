@@ -8,13 +8,11 @@ use warnings;
 require Exporter;
 require DynaLoader;
 
-use Tie::Hash;
-
 our @ISA = qw(Exporter DynaLoader);
 
 our @EXPORT_OK = qw(clone);
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 bootstrap Scalar::Util::Clone $VERSION;
 
@@ -75,6 +73,10 @@ To duplicate non-scalar types (e.g. lists, ARRAYs and HASHes), pass them to C<cl
 For a slower, but more flexible solution see Storable's C<dclone>.
 
 =cut
+
+=head1 VERSION
+
+0.02
 
 =head1 SEE ALSO
 

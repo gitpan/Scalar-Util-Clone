@@ -1,5 +1,7 @@
 Revision history for Perl extension Scalar::Util::Clone
 
+0.02  Tue Apr 12 20:15:36 2005
+    - compatibility/portability fixes + isolate ptr table from perl's implementation
+
 0.01  Sat Apr  2 19:13:13 2005
-	- original version; created by h2xs 1.23 with options
-		-nScalar::Util::Clone
+	- original version; created by h2xs 1.23 with options -nScalar::Util::Clone
