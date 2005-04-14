@@ -1,4 +1,4 @@
-Scalar::Util::Clone version 0.03
+Scalar::Util::Clone version 0.04
 ================================
 
 Scalar::Util::Clone - recursively copy datatypes using perl's builtin functions

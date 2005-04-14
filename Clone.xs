@@ -23,7 +23,7 @@
 #define SAVEPVN(p,n) (p ? savepvn(p,n) : Nullch)
 
 /* #define CLONE_DEBUG Perl_warn */
-#define CLONE_DEBUG(...)
+/* #define CLONE_DEBUG(...) */
 
 #ifdef PURIFY
 #define new_HE() (HE*)safemalloc(sizeof(HE))
@@ -33,7 +33,7 @@
 
 #define CLONE_NEW_SV(sstr, dstr, ptable) \
 STMT_START { \
-	CLONE_DEBUG("    creating new SV\n"); \
+	/* CLONE_DEBUG("    creating new SV\n"); */ \
 	dstr = newSV(0); \
 	(void)SvUPGRADE(dstr, SvTYPE(sstr)); \
 	SvFLAGS(dstr) = SvFLAGS(sstr);	\
@@ -49,7 +49,7 @@ STMT_START { \
 
 #define CLONE_PASS_THRU(sstr, dstr, ptable) \
 STMT_START { \
-	CLONE_DEBUG("    returning original sv\n"); \
+	/* CLONE_DEBUG("    returning original sv\n"); */ \
 	dstr = sstr; \
 	/* dstr = SvREFCNT_inc(SvROK(sstr) ? SvRV(dstr) : dstr); */ \
 	PTABLE_store(ptable, sstr, sstr); \
@@ -236,7 +236,7 @@ clone_re(REGEXP *r, PTABLE_t *ptable)
 	int i, len, npar;
 	struct reg_substr_datum *s;
 
-	CLONE_DEBUG("inside clone_re\n");
+	/* CLONE_DEBUG("inside clone_re\n"); */
 	if (!r)
 		return (REGEXP *)NULL;
 
@@ -334,7 +334,7 @@ clone_mg(MAGIC *mg, PTABLE_t *ptable)
 	MAGIC *mgprev = (MAGIC*)NULL;
 	MAGIC *mgret;
 
-	CLONE_DEBUG("inside clone_mg\n");
+	/* CLONE_DEBUG("inside clone_mg\n"); */
 
 	if (!mg)
 		return (MAGIC*)NULL;
@@ -412,7 +412,7 @@ clone_mg(MAGIC *mg, PTABLE_t *ptable)
 static void
 clone_rvpv(SV *sstr, SV *dstr, PTABLE_t *ptable)
 {
-	CLONE_DEBUG("inside clone_rvpv\n");
+	/* CLONE_DEBUG("inside clone_rvpv\n"); */
 	if (SvROK(sstr)) {
 		SvRV(dstr) = SvWEAKREF(sstr) ? clone_sv(SvRV(sstr), ptable) : clone_sv_inc(SvRV(sstr), ptable);
 	} else if (SvPVX(sstr)) {
@@ -444,7 +444,7 @@ clone_sv(SV *sstr, PTABLE_t *ptable)
 {
 	SV * dstr;
 
-	CLONE_DEBUG("inside clone_sv\n");
+	/* CLONE_DEBUG("inside clone_sv\n"); */
 	if (!sstr || SvTYPE(sstr) == SVTYPEMASK)
 		return Nullsv;
 
@@ -456,33 +456,33 @@ clone_sv(SV *sstr, PTABLE_t *ptable)
 
 	switch (SvTYPE(sstr)) {
 		case SVt_NULL:
-			CLONE_DEBUG("    detected type: %s (NULL)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (NULL)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			break;
 		case SVt_IV:
-			CLONE_DEBUG("    detected type: %s (IV)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (IV)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvIVX(dstr) = SvIVX(sstr);
 			break;
 		case SVt_NV:
-			CLONE_DEBUG("    detected type: %s (NV)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (NV)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvNVX(dstr) = SvNVX(sstr);
 			break;
 		case SVt_RV:
-			CLONE_DEBUG("    detected type: %s (RV)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (RV)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			clone_rvpv(sstr, dstr, ptable);
 			break;
 		case SVt_PV:
-			CLONE_DEBUG("    detected type: %s (PV)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PV)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)     = SvCUR(sstr);
 			SvLEN(dstr)     = SvLEN(sstr);
 			clone_rvpv(sstr, dstr, ptable);
 			break;
 		case SVt_PVIV:
-			CLONE_DEBUG("    detected type: %s (PVIV)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PVIV)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)	= SvCUR(sstr);
 			SvLEN(dstr)	= SvLEN(sstr);
@@ -490,7 +490,7 @@ clone_sv(SV *sstr, PTABLE_t *ptable)
 			clone_rvpv(sstr, dstr, ptable);
 			break;
 		case SVt_PVNV:
-			CLONE_DEBUG("    detected type: %s (PVNV)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PVNV)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)	= SvCUR(sstr);
 			SvLEN(dstr)	= SvLEN(sstr);
@@ -499,7 +499,7 @@ clone_sv(SV *sstr, PTABLE_t *ptable)
 			clone_rvpv(sstr, dstr, ptable);
 			break;
 		case SVt_PVMG:
-			CLONE_DEBUG("    detected type: %s (PVMG)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PVMG)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)	= SvCUR(sstr);
 			SvLEN(dstr)	= SvLEN(sstr);
@@ -510,7 +510,7 @@ clone_sv(SV *sstr, PTABLE_t *ptable)
 			clone_rvpv(sstr, dstr, ptable);
 			break;
 		case SVt_PVBM:
-			CLONE_DEBUG("    detected type: %s (PVBM)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PVBM)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)	= SvCUR(sstr);
 			SvLEN(dstr)	= SvLEN(sstr);
@@ -524,7 +524,7 @@ clone_sv(SV *sstr, PTABLE_t *ptable)
 			BmPREVIOUS(dstr) = BmPREVIOUS(sstr);
 			break;
 		case SVt_PVLV:
-			CLONE_DEBUG("    detected type: %s (PVLV)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PVLV)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr) = SvCUR(sstr);
 			SvLEN(dstr) = SvLEN(sstr);
@@ -545,15 +545,15 @@ clone_sv(SV *sstr, PTABLE_t *ptable)
 			LvTYPE(dstr) = LvTYPE(sstr);
 			break;
 		case SVt_PVGV:
-			CLONE_DEBUG("    detected type: %s (PVGV)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PVGV)\n", sv_reftype(sstr, 0)); */
 			CLONE_PASS_THRU(sstr, dstr, ptable);
 			break;
 		case SVt_PVIO:
-			CLONE_DEBUG("    detected type: %s (PVIO)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PVIO)\n", sv_reftype(sstr, 0)); */
 			CLONE_PASS_THRU(sstr, dstr, ptable);
 			break;
 		case SVt_PVAV:
-			CLONE_DEBUG("    detected type: %s (PVAV)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PVAV)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr)	= SvCUR(sstr);
 			SvLEN(dstr)	= SvLEN(sstr);
@@ -590,7 +590,7 @@ clone_sv(SV *sstr, PTABLE_t *ptable)
 			}
 			break;
 		case SVt_PVHV:
-			CLONE_DEBUG("    detected type: %s (PVHV)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PVHV)\n", sv_reftype(sstr, 0)); */
 			CLONE_NEW_SV(sstr, dstr, ptable);
 			SvCUR(dstr) = SvCUR(sstr);
 			SvLEN(dstr) = SvLEN(sstr);
@@ -627,9 +627,9 @@ clone_sv(SV *sstr, PTABLE_t *ptable)
 			*/
 			break;
 		case SVt_PVFM:
-			CLONE_DEBUG("    detected type: %s (PVFM)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PVFM)\n", sv_reftype(sstr, 0)); */
 		case SVt_PVCV:
-			CLONE_DEBUG("    detected type: %s (PVCV)\n", sv_reftype(sstr, 0));
+			/* CLONE_DEBUG("    detected type: %s (PVCV)\n", sv_reftype(sstr, 0)); */
 			CLONE_PASS_THRU(sstr, dstr, ptable);
 			break;
 		default:
@@ -656,7 +656,7 @@ clone(original)
     PTABLE_t *ptable = NULL;
     PPCODE:
 
-	CLONE_DEBUG("\n");
+	/* CLONE_DEBUG("\n"); */
     ptable = PTABLE_new(); 
     clone = clone_sv(original, ptable);
     PTABLE_free(ptable);

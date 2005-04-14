@@ -8,7 +8,7 @@ WriteMakefile(
     'NAME'            =>    'Scalar::Util::Clone',
     'VERSION_FROM'    =>    'lib/Scalar/Util/Clone.pm',     # finds $VERSION
     'PREREQ_PM'       =>    { # e.g. Module::Name => 1.1
-        'Tie::Hash'	=> 0,
+        'Tie::Hash'		=> 0,
         'IO::Handle'	=> 0,
         'Data::Dumper'	=> 0,
         'Test::More'	=> 0,
