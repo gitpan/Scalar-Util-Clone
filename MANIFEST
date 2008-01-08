@@ -1,16 +1,18 @@
 Changes
 Clone.xs
-MANIFEST
-META.yml
-Makefile.PL
-README
 lib/Scalar/Util/Clone.pm
+Makefile.PL
+MANIFEST			This list of files
+META.yml
 ppport.h
 ptable.h
+README
+t/01_compile.t
 t/clone.t
 t/coderef.t
 t/hashref.t
 t/io.t
+t/pod.t
 t/regex.t
 t/scalar.t
 t/tied.t

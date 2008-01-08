@@ -1,4 +1,6 @@
-#!perl
+use strict;
+use warnings;
+use blib;
 
 use Test::More tests => 6;
 use Scalar::Util::Clone qw(clone);

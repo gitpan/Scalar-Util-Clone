@@ -1,7 +1,6 @@
-#!perl
-
 use strict;
 use warnings;
+use blib;
 
 use Data::Dumper;
 use Scalar::Util::Clone qw(clone);

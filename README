@@ -1,13 +1,13 @@
-Scalar::Util::Clone version 0.04
+Scalar::Util::Clone version 0.10
 ================================
 
 Scalar::Util::Clone - recursively copy datatypes using perl's builtin functions
 
 This module exports a clone() function which unlocks the builtin functionality perl uses to clone a new interpreter
 and its values. As such, it is capable of cloning all perl datatypes, including weak references, hashes with shared keys,
-hashes with UTF8 keys, restricted hashes, tied variables, regex objects, and other curios lurking in Perl's intestines. Because
-the clone operation is performed at the lowest level, copying the datatype's internals rather than reconstructing it
-via the public API, the operation is fast and comprehensive, and produces values that exactly match their original
+hashes with UTF8 keys, restricted hashes, tied variables, regex objects, and other curios lurking in Perl's intestines.
+Because the clone operation is performed at the lowest level, copying the datatype's internals rather than reconstructing
+it via the public API, the operation is fast and comprehensive, and produces values that exactly match their original
 (for instance, Data::Dumper dumps of hashes are always guaranteed to be the same as those of the original).
 
 For performance reasons, the following types are passed through transparently rather than being deep cloned:
@@ -24,15 +24,9 @@ To install this module type the following:
    make test
    make install
 
-DEPENDENCIES
-
-This module's test suite has the following dependency:
-
-  Scalar::Util 1.01
-
 COPYRIGHT AND LICENCE
 
-Copyright (c) 2005 chocolateboy <chocolate.boy@email.com>
+Copyright (c) 2005-2008 chocolateboy <chocolate.boy@email.com>
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself. 

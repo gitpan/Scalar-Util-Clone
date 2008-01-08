@@ -1,5 +1,10 @@
 Revision history for Perl extension Scalar::Util::Clone
 
+0.10  Tue Jan  8 12:40:22 2008
+    - Win32 Makefile fix (thanks Ron Savage)
+    - Perl_share_hek fix: should now work with all 5.8.x perls (thanks Ron Savage, Wolfgang Baron)
+    - misc optimizations and cleanups
+
 0.04  Thu Apr 14 18:59:06 2005
     - another portability fix
 

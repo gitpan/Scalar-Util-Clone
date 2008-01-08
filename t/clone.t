@@ -86,10 +86,10 @@ use Scalar::Util qw(weaken);
 sub new {
     my ($class, $id) = @_;
     my $self = {
-		CHILDREN    => [ ],
-		ID	    => $id,
-		INDEX	    => { },
-		PARENT	    => undef
+	CHILDREN    => [ ],
+	ID	    => $id,
+	INDEX	    => { },
+	PARENT	    => undef
     };
     bless $self, $class;
 }
@@ -110,11 +110,11 @@ package main;
 
 use strict;
 use warnings;
+use blib;
 
 use Data::Dumper;
-use Test::More tests => 34;
-
-BEGIN { $| = 1; use_ok('Scalar::Util::Clone', qw(clone)); } # 1 
+use Test::More tests => 33;
+use Scalar::Util::Clone qw(clone);
 
 # Test::Deep's cache transforms the values it compares - in particular
 # it winds up leaving null pointers in the magical backref AV of weak referents,
@@ -122,62 +122,57 @@ BEGIN { $| = 1; use_ok('Scalar::Util::Clone', qw(clone)); } # 1
 # anomalies - to segfault.
 
 sub is_deep ($$;$) {
-	my ($got, $want, $msg) = @_;
-	no warnings 'once';
-	local ($Data::Dumper::Terse = $Data::Dumper::Indent) = (1, 1);
-	return is(Dumper($got), Dumper($want), $msg);
+    my ($got, $want, $msg) = @_;
+    no warnings 'once';
+    local ($Data::Dumper::Terse = $Data::Dumper::Indent) = (1, 1);
+    return is(Dumper($got), Dumper($want), $msg);
 }
 
-SKIP: {
-    skip ('Weakrefs are not supported in this version of perl', 13) unless (&Scalar::Util::Clone::supports_weakrefs);
+use_ok('Scalar::Util', qw(weaken isweak));
 
-    # don't use Scalar::Util until we're sure this perl supports weakrefs
-    use_ok('Scalar::Util', qw(weaken isweak));
+my $v1 = {};
 
-    my $v1 = {};
+$v1->{a} = $v1;
 
-    $v1->{a} = $v1;
+weaken ($v1->{a});
+my $v2 = clone($v1);
 
-    weaken ($v1->{a});
-    my $v2 = clone($v1);
+ok (isweak ($v1->{a}), 'original weakref');
+ok (isweak ($v2->{a}), 'cloned weakref');
+is_deep($v1, $v2, 'cloned weakref - same contents');
 
-    ok (isweak ($v1->{a}), 'original weakref');
-    ok (isweak ($v2->{a}), 'cloned weakref');
-    is_deep($v1, $v2, 'cloned weakref - same contents');
+my $multi_weak = [ $v1, $v1, $v2, $v2 ];
+my $multi_weak_clone = clone($multi_weak);
+# print Dumper($multi_weak_clone), $/;
+# print Dumper($multi_weak), $/;
+is_deep($multi_weak, $multi_weak_clone, 'cloned weakrefs - same contents');
 
-    my $multi_weak = [ $v1, $v1, $v2, $v2 ];
-    my $multi_weak_clone = clone($multi_weak);
-	# print Dumper($multi_weak_clone), $/;
-	# print Dumper($multi_weak), $/;
-    is_deep($multi_weak, $multi_weak_clone, 'cloned weakrefs - same contents');
+my $node1 = Scalar::Util::Clone::Test::Node->new(1);
+my $node2 = Scalar::Util::Clone::Test::Node->new(2);
+my $node3 = Scalar::Util::Clone::Test::Node->new(3);
 
-    my $node1 = Scalar::Util::Clone::Test::Node->new(1);
-    my $node2 = Scalar::Util::Clone::Test::Node->new(2);
-    my $node3 = Scalar::Util::Clone::Test::Node->new(3);
+$node2->add($node3);
+$node1->add($node2);
 
-    $node2->add($node3);
-    $node1->add($node2);
+my $node4 = clone($node1);
 
-    my $node4 = clone($node1);
+isnt ($node4, $node1, 'cloned node: different refs');
+is_deep($node4, $node1, 'cloned node: same data');
 
-    isnt ($node4, $node1, 'cloned node: different refs');
-    is_deep($node4, $node1, 'cloned node: same data');
+isnt ($node4->{CHILDREN}, $node1->{CHILDREN}, 'cloned node children: different refs');
+# the by-name index of child nodes is tested because that's the
+# kind of node used by Xelig 
+isnt ($node4->{INDEX}, $node1->{INDEX}, 'cloned node index: different refs');
 
-    isnt ($node4->{CHILDREN}, $node1->{CHILDREN}, 'cloned node children: different refs');
-    # the by-name index of child nodes is tested because that's the
-    # kind of node used by Xelig 
-    isnt ($node4->{INDEX}, $node1->{INDEX}, 'cloned node index: different refs');
+is ($node1->{CHILDREN}->[0]->{PARENT}, $node1,
+    'original node: self->child->parent = self');
+is ($node4->{CHILDREN}->[0]->{PARENT}, $node4,
+    'cloned node: self->child->parent = self');
 
-    is ($node1->{CHILDREN}->[0]->{PARENT}, $node1,
-	'original node: self->child->parent = self');
-    is ($node4->{CHILDREN}->[0]->{PARENT}, $node4,
-	'cloned node: self->child->parent = self');
-
-    is ($node1->{INDEX}->{2}->{PARENT}, $node1,
-	'original node: self->idx->child->parent = self');
-    is ($node4->{INDEX}->{2}->{PARENT}, $node4,
-	'cloned node: self->idx->child->parent = self');
-}
+is ($node1->{INDEX}->{2}->{PARENT}, $node1,
+    'original node: self->idx->child->parent = self');
+is ($node4->{INDEX}->{2}->{PARENT}, $node4,
+    'cloned node: self->idx->child->parent = self');
 
 my %tied = ();
 
@@ -213,7 +208,7 @@ for (0 .. 9) {
 }
 
 my $hash_clone = clone($hash);
-my $uhash_clone = clone ($uhash);
+my $uhash_clone = clone($uhash);
 my $array_clone = clone($array);
 my $tied_clone = clone($tied);
 my $all_clone1 = clone($all);
@@ -247,11 +242,12 @@ my $all_clone2 = clone($all);
 
 isnt ($all, $all_clone2, 'compound self-referential data structure: different refs');
 
-is_deep($all_clone2, $all,
-    'compound self-referential data structure: same values');
+is_deep($all_clone2, $all, 'compound self-referential data structure: same values');
+    
 delete $all->{SELF};
 	    
 bless $all, 'Scalar::Util::Clone::Test::Object';
+
 my $all_clone3 = clone($all);
 
 isnt ($all, $all_clone3, 'object: different refs');

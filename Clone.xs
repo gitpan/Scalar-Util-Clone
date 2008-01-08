@@ -1,8 +1,9 @@
+#define PERL_NO_GET_CONTEXT
+
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
 #include "ppport.h"
-#include "regcomp.h"
 
 #include "ptable.h"
 
@@ -11,666 +12,621 @@
    The clone_foo() functions make an exact copy of an existing foo thingy.
    During the course of a cloning, a hash table is used to map old addresses
    to new addresses. The table is created and manipulated with the
-   PTABLE_* functions.
+   PTABLE_* functions in ptable.h.
 
 */
 
-#define clone_sv_inc(s,t) SvREFCNT_inc(clone_sv(s,t))
-#define clone_av_inc(s,t) (AV*)SvREFCNT_inc(clone_sv((SV*)s,t))
-#define clone_cv_inc(s,t) (CV*)SvREFCNT_inc(clone_sv((SV*)s,t))
+#define clone_sv_inc(src, cache) SvREFCNT_inc(clone_sv(aTHX_ src, cache))
 
 #define SAVEPV(p) (p ? savepv(p) : Nullch)
 #define SAVEPVN(p,n) (p ? savepvn(p,n) : Nullch)
+#define new_HE() new_he(aTHX)
 
-/* #define CLONE_DEBUG Perl_warn */
-/* #define CLONE_DEBUG(...) */
+#define CLONE_COPY_STASH(src, dest) (SvSTASH(dest) = (HV *)SvREFCNT_inc(SvSTASH(src)))
 
-#ifdef PURIFY
-#define new_HE() (HE*)safemalloc(sizeof(HE))
-#else
-#define new_HE() new_he()
-#endif
-
-#define CLONE_NEW_SV(sstr, dstr, ptable) \
-STMT_START { \
-	/* CLONE_DEBUG("    creating new SV\n"); */ \
-	dstr = newSV(0); \
-	(void)SvUPGRADE(dstr, SvTYPE(sstr)); \
-	SvFLAGS(dstr) = SvFLAGS(sstr);	\
-	/* don't propagate OOK hack or context-specific flags */ \
-	/* SVpad_OUR conflicts with SvWEAKREF */ \
-	/* SvFLAGS(dstr) &= ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVs_TEMP | SVpad_OUR); */ \
-	SvFLAGS(dstr) &= ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK); \
-	SvREFCNT(dstr) = 0; /* must be before any other dups! */ \
-	/* TODO */ \
-	/* SvTAINTED(dstr) = SvTAINTED(sstr); */ \
-	PTABLE_store(ptable, sstr, dstr); \
-} STMT_END
-
-#define CLONE_PASS_THRU(sstr, dstr, ptable) \
-STMT_START { \
-	/* CLONE_DEBUG("    returning original sv\n"); */ \
-	dstr = sstr; \
-	/* dstr = SvREFCNT_inc(SvROK(sstr) ? SvRV(dstr) : dstr); */ \
-	PTABLE_store(ptable, sstr, sstr); \
-} STMT_END
-
-#define CLONE_COPY_STASH(sstr, dsrt) (SvSTASH(dstr) = (HV *)SvREFCNT_inc(SvSTASH(sstr)))
-
-#ifdef SvWEAKREF
 #ifdef PERL_MAGIC_backref
 #define WEAKREF_IDENTIFIER PERL_MAGIC_backref
 #else
 #define WEAKREF_IDENTIFIER '<'
 #endif
-#endif
 
-/* the Perl_sharepvn macro is public but references a (possibly) private function - fix that */
-#ifdef share_hek
-#define CLONE_SHAREPVN(sv, len, hash) HEK_KEY(share_hek(aTHX_ sv, len, hash))
-#else
-#define CLONE_SHAREPVN(sv, len, hash) HEK_KEY(Perl_share_hek(aTHX_ sv, len, hash))
-#endif
+#define CLONE_SHAREPVN(sv, len, hash) (HEK_KEY(share_hek(sv, len, hash)))
 
+/*
+ * chocolateboy
+ *
+ * Not every reference that refers to a weak referent is weak. For instance, in:
+ *
+ *     $test = [ undef ];
+ *     weaken($test->[0] = $test);
+ *
+ * $test is not a weakref, but $test->[0] is.
+ *
+ * However, all weak references refer to weak referents.
+ *
+ * Thus we can save a little time by telling clone_sv that the referent is weak,
+ * which prevents it consulting the sv's magic
+ */
 
-static SV * clone_sv(SV *sstr, PTABLE_t *ptable);
-static void clone_rvpv(SV *sstr, SV *dstr, PTABLE_t *ptable);
-static REGEXP *clone_re(REGEXP *r, PTABLE_t *ptable);
-static MAGIC * clone_mg(MAGIC *mg, PTABLE_t *ptable);
+#define CLONE_RVPV(src, dest)							    \
+STMT_START {                                                                        \
+    if (SvROK(src)) {                                                               \
+        SvRV(dest) = SvWEAKREF(src) ?                                               \
+            clone_sv(aTHX_ SvRV(src), TRUE) :					    \
+            clone_sv_inc(SvRV(src), FALSE);					    \
+    } else if (SvPVX(src)) {							    \
+        /* Has something there */                                                   \
+        if (SvLEN(src)) {                                                           \
+            /* Normal PV - clone whole allocated space */                           \
+            SvPVX(dest) = SAVEPVN(SvPVX(src), SvLEN(src)-1);                        \
+        } else {                                                                    \
+            /* Special case - not normally malloced for some reason */              \
+            if (SvREADONLY(src) && SvFAKE(src)) {                                   \
+                /* A "shared" PV */                                                 \
+                SvPVX(dest) = CLONE_SHAREPVN(SvPVX(src), SvCUR(src), SvUVX(src));   \
+                SvUVX(dest) = SvUVX(src);                                           \
+            } else {                                                                \
+                /* Some other special case - random pointer */                      \
+                SvPVX(dest) = SvPVX(src);                                           \
+            }                                                                       \
+        }                                                                           \
+    } else {                                                                        \
+        /* Copy the Null */                                                         \
+        SvPVX(dest) = SvPVX(src);                                                   \
+    }                                                                               \
+} STMT_END
 
-static HE* new_he(void);
-static void more_he(void);
+static PTABLE_t *PTABLE;
+
+static SV * clone_sv(pTHX_ SV *src, I32 cache);
+static MAGIC * clone_mg(pTHX_ MAGIC *mg);
+
+static HE * new_he(pTHX);
+static void more_he(pTHX);
 static HEK * save_hek_flags(const char *str, I32 len, U32 hash, int flags);
-static HE * clone_he(HE *e, bool shared, PTABLE_t * ptable);
-static HEK * share_hek_flags(const char *str, I32 len, register U32 hash, int flags);
+static HE * clone_he(pTHX_ HE *e, bool shared);
+static HEK * share_hek_flags(pTHX_ const char *str, I32 len, register U32 hash, int flags);
+
+/*
+ * chocolateboy
+ *
+ * share_hek wasn't made public till 5.8.8
+ */
+
+#ifndef share_hek
+/* get a (constant) string ptr from the global string table
+ * string will get added if it is not already there.
+ * len and hash must both be valid for str.
+ */
 
 static HEK *
-save_hek_flags(const char *str, I32 len, U32 hash, int flags)
+clone_share_hek(pTHX_ const char *str, I32 len, register U32 hash)
 {
-	int flags_masked = flags & HVhek_MASK;
+    bool is_utf8 = FALSE;
+    int flags = 0;
+    const char * const save = str;
+
+    if (len < 0) {
+      STRLEN tmplen = -len;
+      is_utf8 = TRUE;
+      /* See the note in hv_fetch(). --jhi */
+      str = (char*)bytes_from_utf8((U8*)str, &tmplen, &is_utf8);
+      len = tmplen;
+      /* If we were able to downgrade here, then than means that we were passed
+         in a key which only had chars 0-255, but was utf8 encoded.  */
+      if (is_utf8)
+          flags = HVhek_UTF8;
+      /* If we found we were able to downgrade the string to bytes, then
+         we should flag that it needs upgrading on keys or each.  Also flag
+         that we need share_hek_flags to free the string.  */
+      if (str != save)
+          flags |= HVhek_WASUTF8 | HVhek_FREEKEY;
+    }
+
+    return share_hek_flags (aTHX_ str, len, hash, flags);
+}
+#define share_hek(str, len, hash) (clone_share_hek(aTHX_ str, len, hash))
+#endif
+
+static HEK * save_hek_flags(const char *str, I32 len, U32 hash, int flags) {
+    int flags_masked = flags & HVhek_MASK;
+    char *k;
+    register HEK *hek;
+
+    Newx(k, HEK_BASESIZE + len + 2, char);
+    hek = (HEK*)k;
+    Copy(str, HEK_KEY(hek), len, char);
+    HEK_KEY(hek)[len] = 0;
+    HEK_LEN(hek) = len;
+    HEK_HASH(hek) = hash;
+    HEK_FLAGS(hek) = (unsigned char)flags_masked;
+
+    if (flags & HVhek_FREEKEY)
+	Safefree(str);
+
+    return hek;
+}
+
+static HEK * share_hek_flags(pTHX_ const char *str, I32 len, register U32 hash, int flags) {
+    register XPVHV* xhv;
+    register HE *entry;
+    register HE **oentry;
+    register I32 i = 1;
+    I32 found = 0;
+    int flags_masked = flags & HVhek_MASK;
+
+    /* what follows is the moral equivalent of:
+
+       if (!(Svp = hv_fetch(PL_strtab, str, len, TRUE)))
+       hv_store(PL_strtab, str, len, Nullsv, hash);
+
+       Can't rehash the shared string table, so not sure if it's worth
+       counting the number of entries in the linked list
+     */
+    xhv = (XPVHV*)SvANY(PL_strtab);
+    LOCK_STRTAB_MUTEX;
+    /* oentry = &(HvARRAY(hv))[hash & (I32) HvMAX(hv)]; */                                                                   
+    oentry = &((HE**)xhv->xhv_array)[hash & (I32) xhv->xhv_max];
+    for (entry = *oentry; entry; i = 0, entry = HeNEXT(entry)) {
+	if (HeHASH(entry) != hash) /* strings can't be equal */
+	    continue;
+	if (HeKLEN(entry) != len)
+	    continue;
+	if (HeKEY(entry) != str && memNE(HeKEY(entry),str,len)) /* is this it? */
+	    continue;
+	if (HeKFLAGS(entry) != flags_masked)
+	    continue;
+	found = 1;
+	++HeVAL(entry); /* use value slot as REFCNT */
+	break;
+    }
+
+    UNLOCK_STRTAB_MUTEX;
+
+    if (flags & HVhek_FREEKEY)
+	Safefree(str);
+
+    /* 
+     * chocolateboy
+     * 
+     * We can bypass the call to hsplit (which requires a lot of potentially volatile code to be inlined)
+     * if we enforce the rule that shared keys are still shared. Two obvious violations of this would be
+     * a) a HASH with invalid flags (i.e. its keys, for some reason, are not really shared) and b) invocation
+     * of clone after the shared string table has been freed (e.g. during global destruction)
+     */
+
+    if (!found)
+	Perl_croak(aTHX_ "can't find shared key in string table");
+
+    return HeKEY_hek(entry);
+}
+
+static HE* new_he(pTHX) {
+    HE* he;
+    LOCK_SV_MUTEX;
+    if (!PL_he_root)
+	more_he(aTHX);
+    he = PL_he_root;
+    PL_he_root = HeNEXT(he);
+    UNLOCK_SV_MUTEX;
+    return he;
+}
+
+static void more_he(pTHX) {
+    register HE* he;
+    register HE* heend;
+    XPV *ptr;
+    Newx(ptr, 1008 / sizeof(XPV), XPV);
+    ptr->xpv_pv = (char*)PL_he_arenaroot;
+    PL_he_arenaroot = ptr;
+
+    he = (HE*)ptr;
+    heend = &he[1008 / sizeof(HE) - 1];
+    PL_he_root = ++he;
+    while (he < heend) {
+	HeNEXT(he) = (HE*)(he + 1);
+	he++;
+    }
+    HeNEXT(he) = 0;
+}
+
+static HE * clone_he(pTHX_ HE *e, bool shared) {
+    HE *ret = NULL;
+
+    /* create anew and remember what it is */
+    ret = new_HE();
+
+    HeNEXT(ret) = HeNEXT(e) ? clone_he(aTHX_ HeNEXT(e), shared) : Nullhe;
+
+    if (HeKLEN(e) == HEf_SVKEY) {
 	char *k;
-	register HEK *hek;
+	Newx(k, HEK_BASESIZE + sizeof(SV*), char);
+	HeKEY_hek(ret) = (HEK*)k;
+	HeKEY_sv(ret) = SvREFCNT_inc(clone_sv(aTHX_ HeKEY_sv(e), FALSE));
+    } else if (shared) {
+	HeKEY_hek(ret) = share_hek_flags(aTHX_ HeKEY(e), HeKLEN(e), HeHASH(e), HeKFLAGS(e));
+    } else {
+	HeKEY_hek(ret) = save_hek_flags(HeKEY(e), HeKLEN(e), HeHASH(e), HeKFLAGS(e));
+    }
 
-	New(0, k, HEK_BASESIZE + len + 2, char);
-	hek = (HEK*)k;
-	Copy(str, HEK_KEY(hek), len, char);
-	HEK_KEY(hek)[len] = 0;
-	HEK_LEN(hek) = len;
-	HEK_HASH(hek) = hash;
-	HEK_FLAGS(hek) = (unsigned char)flags_masked;
-
-	if (flags & HVhek_FREEKEY)
-		Safefree(str);
-
-	return hek;
-}
-
-static HEK *
-share_hek_flags(const char *str, I32 len, register U32 hash, int flags)
-{
-	register XPVHV* xhv;
-	register HE *entry;
-	register HE **oentry;
-	register I32 i = 1;
-	I32 found = 0;
-	int flags_masked = flags & HVhek_MASK;
-
-	/* what follows is the moral equivalent of:
-
-	   if (!(Svp = hv_fetch(PL_strtab, str, len, FALSE)))
-	   hv_store(PL_strtab, str, len, Nullsv, hash);
-
-	   Can't rehash the shared string table, so not sure if it's worth
-	   counting the number of entries in the linked list
-	   */
-	xhv = (XPVHV*)SvANY(PL_strtab);
-	LOCK_STRTAB_MUTEX;
-	/* oentry = &(HvARRAY(hv))[hash & (I32) HvMAX(hv)]; */                                                                   
-	oentry = &((HE**)xhv->xhv_array)[hash & (I32) xhv->xhv_max];
-	for (entry = *oentry; entry; i = 0, entry = HeNEXT(entry)) {
-		if (HeHASH(entry) != hash) /* strings can't be equal */
-			continue;
-		if (HeKLEN(entry) != len)
-			continue;
-		if (HeKEY(entry) != str && memNE(HeKEY(entry),str,len)) /* is this it? */
-			continue;
-		if (HeKFLAGS(entry) != flags_masked)
-			continue;
-		found = 1;
-		++HeVAL(entry); /* use value slot as REFCNT */
-		break;
-	}
-
-	UNLOCK_STRTAB_MUTEX;
-
-	if (flags & HVhek_FREEKEY)
-		Safefree(str);
-
-	/* 
-	 * We can bypass the call to hsplit (which requires a lot of potentially volatile code to be inlined)
-	 * if we enforce the rule that shared keys are still shared. Two obvious violations of this would be
-	 * a) a HASH with invalid flags (i.e. its keys, for some reason, are not really shared) and b) invocation
-	 * of clone after the shared string table has been freed (e.g. during global destruction)
-	 */
-
-	if (!found)
-		Perl_croak(aTHX_ "can't find shared key in string table");
-
-	return HeKEY_hek(entry);
-}
-
-static HE*
-new_he(void)
-{
-	HE* he;
-	LOCK_SV_MUTEX;
-	if (!PL_he_root)
-		more_he();
-	he = PL_he_root;
-	PL_he_root = HeNEXT(he);
-	UNLOCK_SV_MUTEX;
-	return he;
-}
-
-static void
-more_he(void)
-{
-	register HE* he;
-	register HE* heend;
-	XPV *ptr;
-	New(0, ptr, 1008 / sizeof(XPV), XPV);
-	ptr->xpv_pv = (char*)PL_he_arenaroot;
-	PL_he_arenaroot = ptr;
-
-	he = (HE*)ptr;
-	heend = &he[1008 / sizeof(HE) - 1];
-	PL_he_root = ++he;
-	while (he < heend) {
-		HeNEXT(he) = (HE*)(he + 1);
-		he++;
-	}
-	HeNEXT(he) = 0;
-}
-
-static HE *
-clone_he(HE *e, bool shared, PTABLE_t * ptable)
-{
-	HE *ret;
-
-	if (!e)
-		return Nullhe;
-
-	/* look for it in the table first */
-	ret = (HE*)PTABLE_fetch(ptable, e);
-
-	if (ret)
-		return ret;
-
-	/* create anew and remember what it is */
-	ret = new_HE();
-	PTABLE_store(ptable, e, ret);
-	HeNEXT(ret) = clone_he(HeNEXT(e), shared, ptable);
-
-	if (HeKLEN(e) == HEf_SVKEY) {
-		char *k;
-		New(0, k, HEK_BASESIZE + sizeof(SV*), char);
-		HeKEY_hek(ret) = (HEK*)k;
-		HeKEY_sv(ret) = SvREFCNT_inc(clone_sv(HeKEY_sv(e), ptable));
-	} else if (shared) {
-		HeKEY_hek(ret) = share_hek_flags(HeKEY(e), HeKLEN(e), HeHASH(e), HeKFLAGS(e));
-	} else {
-		HeKEY_hek(ret) = save_hek_flags(HeKEY(e), HeKLEN(e), HeHASH(e), HeKFLAGS(e));
-	}
-
-	HeVAL(ret) = SvREFCNT_inc(clone_sv(HeVAL(e), ptable));
-	return ret;
-}
-
-/* Duplicate a regexp. Required reading: pregcomp() and pregfree() in
-   regcomp.c. AMS 20010712 */
-
-static REGEXP *
-clone_re(REGEXP *r, PTABLE_t *ptable)
-{
-	REGEXP *ret;
-	int i, len, npar;
-	struct reg_substr_datum *s;
-
-	/* CLONE_DEBUG("inside clone_re\n"); */
-	if (!r)
-		return (REGEXP *)NULL;
-
-	if ((ret = (REGEXP *)PTABLE_fetch(ptable, r)))
-		return ret;
-
-	len = r->offsets[0];
-	npar = r->nparens+1;
-
-	Newc(0, ret, sizeof(regexp) + (len+1)*sizeof(regnode), char, regexp);
-	Copy(r->program, ret->program, len+1, regnode);
-
-	New(0, ret->startp, npar, I32);
-	Copy(r->startp, ret->startp, npar, I32);
-	New(0, ret->endp, npar, I32);
-	Copy(r->startp, ret->startp, npar, I32);
-
-	New(0, ret->substrs, 1, struct reg_substr_data);
-	for (s = ret->substrs->data, i = 0; i < 3; i++, s++) {
-		s->min_offset = r->substrs->data[i].min_offset;
-		s->max_offset = r->substrs->data[i].max_offset;
-		s->substr = clone_sv_inc(r->substrs->data[i].substr, ptable);
-		s->utf8_substr = clone_sv_inc(r->substrs->data[i].utf8_substr, ptable);
-	}
-
-	ret->regstclass = NULL;
-	if (r->data) {
-		struct reg_data *d;
-		int count = r->data->count;
-
-		Newc(0, d, sizeof(struct reg_data) + count*sizeof(void *),
-				char, struct reg_data);
-		New(0, d->what, count, U8);
-
-		d->count = count;
-		for (i = 0; i < count; i++) {
-			d->what[i] = r->data->what[i];
-			switch (d->what[i]) {
-				case 's':
-					d->data[i] = clone_sv_inc((SV *)r->data->data[i], ptable);
-					break;
-				case 'p':
-					d->data[i] = clone_av_inc((AV *)r->data->data[i], ptable);
-					break;
-				case 'f':
-					/* This is cheating. */
-					New(0, d->data[i], 1, struct regnode_charclass_class);
-					StructCopy(r->data->data[i], d->data[i], struct regnode_charclass_class);
-					ret->regstclass = (regnode*)d->data[i];
-					break;
-				case 'o':
-					/* Compiled op trees are readonly, and can thus be
-					   shared without duplication. */
-					d->data[i] = (void*)OpREFCNT_inc((OP*)r->data->data[i]);
-					break;
-				case 'n':
-					d->data[i] = r->data->data[i];
-					break;
-			}
-		}
-
-		ret->data = d;
-	}
-	else
-		ret->data = NULL;
-
-	New(0, ret->offsets, 2*len+1, U32);
-	Copy(r->offsets, ret->offsets, 2*len+1, U32);
-
-	ret->precomp        = SAVEPVN(r->precomp, r->prelen);
-	ret->refcnt         = r->refcnt;
-	ret->minlen         = r->minlen;
-	ret->prelen         = r->prelen;
-	ret->nparens        = r->nparens;
-	ret->lastparen      = r->lastparen;
-	ret->lastcloseparen = r->lastcloseparen;
-	ret->reganch        = r->reganch;
-
-	ret->sublen         = r->sublen;
-
-	if (RX_MATCH_COPIED(ret))
-		ret->subbeg  = SAVEPVN(r->subbeg, r->sublen);
-	else
-		ret->subbeg = Nullch;
-
-	PTABLE_store(ptable, r, ret);
-	return ret;
+    HeVAL(ret) = SvREFCNT_inc(clone_sv(aTHX_ HeVAL(e), FALSE));
+    return ret;
 }
 
 /* duplicate a chain of magic */
 
-static MAGIC *
-clone_mg(MAGIC *mg, PTABLE_t *ptable)
-{
-	MAGIC *mgprev = (MAGIC*)NULL;
-	MAGIC *mgret;
+static MAGIC * clone_mg(pTHX_ MAGIC *mg) {
+    MAGIC *mgprev = (MAGIC*)NULL;
+    MAGIC *mgret = NULL;
 
-	/* CLONE_DEBUG("inside clone_mg\n"); */
+    if (!mg)
+	return (MAGIC*)NULL;
 
-	if (!mg)
-		return (MAGIC*)NULL;
+    for (; mg; mg = mg->mg_moremagic) {
+	MAGIC *nmg;
+	Newxz(nmg, 1, MAGIC);
 
-	/* look for it in the table first */
-	mgret = (MAGIC*)PTABLE_fetch(ptable, mg);
-
-	if (mgret)
-		return mgret;
-
-	for (; mg; mg = mg->mg_moremagic) {
-		MAGIC *nmg;
-		Newz(0, nmg, 1, MAGIC);
-
-		if (mgprev) {
-			mgprev->mg_moremagic = nmg;
-		} else {
-			mgret = nmg;
-		}
-
-		nmg->mg_virtual	= mg->mg_virtual; /* XXX copy dynamic vtable? */
-		nmg->mg_private	= mg->mg_private;
-		nmg->mg_type	= mg->mg_type;
-		nmg->mg_flags	= mg->mg_flags;
-
-		if (mg->mg_type == PERL_MAGIC_qr) {
-			nmg->mg_obj	= (SV*)clone_re((REGEXP*)mg->mg_obj, ptable);
-		} else if (mg->mg_type == WEAKREF_IDENTIFIER) {
-			AV *av = (AV*) mg->mg_obj;
-			SV **svp;
-			I32 i;
-			SvREFCNT_inc(nmg->mg_obj = (SV*)newAV());
-			svp = AvARRAY(av);
-			for (i = AvFILLp(av); i >= 0; --i) {
-				if (!svp[i]) continue;
-				av_push((AV*)nmg->mg_obj,clone_sv(svp[i], ptable));
-			}
-		} else {
-			nmg->mg_obj	= (mg->mg_flags & MGf_REFCOUNTED)
-				? clone_sv_inc(mg->mg_obj, ptable)
-				: clone_sv(mg->mg_obj, ptable);
-		}
-		nmg->mg_len = mg->mg_len;
-		nmg->mg_ptr = mg->mg_ptr; /* XXX random ptr? */
-
-		if (mg->mg_ptr && mg->mg_type != PERL_MAGIC_regex_global) {
-			if (mg->mg_len > 0) {
-				nmg->mg_ptr = SAVEPVN(mg->mg_ptr, mg->mg_len);
-				if (mg->mg_type == PERL_MAGIC_overload_table && AMT_AMAGIC((AMT*)mg->mg_ptr)) {
-					AMT *amtp = (AMT*)mg->mg_ptr;
-					AMT *namtp = (AMT*)nmg->mg_ptr;
-					I32 i;
-					for (i = 1; i < NofAMmeth; i++) {
-						namtp->table[i] = clone_cv_inc(amtp->table[i], ptable);
-					}
-				}
-			} else if (mg->mg_len == HEf_SVKEY) {
-				nmg->mg_ptr	= (char*)clone_sv_inc((SV*)mg->mg_ptr, ptable);
-			}
-		}
-
-/* FIXME - only for threaded perls */
-=pod
-		if ((mg->mg_flags & MGf_DUP) && mg->mg_virtual && mg->mg_virtual->svt_dup) {
-			Perl_croak("can't handle clone hook");
-			CALL_FPTR(nmg->mg_virtual->svt_dup)(nmg, 0); /* FIXME missing CLONE_PARAMS *param */
-		}
-=cut
-
-		mgprev = nmg;
-	}
-	return mgret;
-}
-
-static void
-clone_rvpv(SV *sstr, SV *dstr, PTABLE_t *ptable)
-{
-	/* CLONE_DEBUG("inside clone_rvpv\n"); */
-	if (SvROK(sstr)) {
-		SvRV(dstr) = SvWEAKREF(sstr) ? clone_sv(SvRV(sstr), ptable) : clone_sv_inc(SvRV(sstr), ptable);
-	} else if (SvPVX(sstr)) {
-		/* Has something there */
-		if (SvLEN(sstr)) {
-			/* Normal PV - clone whole allocated space */
-			SvPVX(dstr) = SAVEPVN(SvPVX(sstr), SvLEN(sstr)-1);
-		} else {
-			/* Special case - not normally malloced for some reason */
-			if (SvREADONLY(sstr) && SvFAKE(sstr)) {
-				/* A "shared" PV */
-				SvPVX(dstr) = CLONE_SHAREPVN(SvPVX(sstr), SvCUR(sstr), SvUVX(sstr));
-				SvUVX(dstr) = SvUVX(sstr);
-			} else {
-				/* Some other special case - random pointer */
-				SvPVX(dstr) = SvPVX(sstr);
-			}
-		}
+	if (mgprev) {
+	    mgprev->mg_moremagic = nmg;
 	} else {
-		/* Copy the Null */
-		SvPVX(dstr) = SvPVX(sstr);
+	    mgret = nmg;
 	}
+
+	nmg->mg_virtual	= mg->mg_virtual; /* XXX copy dynamic vtable? */
+	nmg->mg_private	= mg->mg_private;
+	nmg->mg_type	= mg->mg_type;
+	nmg->mg_flags	= mg->mg_flags;
+
+	if (mg->mg_type == WEAKREF_IDENTIFIER) {
+	    AV *av = (AV*) mg->mg_obj;
+	    SV **svp;
+	    I32 i;
+
+	    /*
+		chocolateboy
+
+		The refcount of the backrefs array changed from 1 to 2 in 2003.
+
+		We can improve backwards compatibility by copying the refcount instead
+		of fixing it at the current default.
+	    */
+
+	    /* SvREFCNT_inc(nmg->mg_obj = (SV*)newAV()); */
+	    nmg->mg_obj = (SV*)newAV();
+	    SvREFCNT(nmg->mg_obj) = SvREFCNT(mg->mg_obj);
+
+	    svp = AvARRAY(av);
+	    for (i = AvFILLp(av); i >= 0; --i) {
+		if (!svp[i]) continue;
+		av_push((AV*)nmg->mg_obj, clone_sv_inc(svp[i], TRUE));
+	    }
+	} else {
+            /*
+             * chocolateboy
+             * 
+             * Another exception to the rule that SVs with a refcount < 2 don't
+             * need to be cached - some magical SVs bypass the standard refcounting
+             * mechanism.
+             */
+	    nmg->mg_obj	= (mg->mg_flags & MGf_REFCOUNTED)
+		? clone_sv_inc(mg->mg_obj, TRUE)
+		: clone_sv(aTHX_ mg->mg_obj, TRUE); /* XXX chocolateboy: for some reason, this must be cached */
+	}
+	nmg->mg_len = mg->mg_len;
+	nmg->mg_ptr = mg->mg_ptr; /* XXX random ptr? */
+
+	if (mg->mg_ptr && mg->mg_type != PERL_MAGIC_regex_global) {
+	    if (mg->mg_len > 0) {
+		nmg->mg_ptr = SAVEPVN(mg->mg_ptr, mg->mg_len);
+		if (mg->mg_type == PERL_MAGIC_overload_table && AMT_AMAGIC((AMT*)mg->mg_ptr)) {
+		    AMT *amtp = (AMT*)mg->mg_ptr;
+		    AMT *namtp = (AMT*)nmg->mg_ptr;
+		    I32 i;
+		    for (i = 1; i < NofAMmeth; i++) {
+			namtp->table[i] = (CV *)SvREFCNT_inc((SV *)amtp->table[i]);
+		    }
+		}
+	    } else if (mg->mg_len == HEf_SVKEY) {
+		nmg->mg_ptr = (char*)clone_sv_inc((SV*)mg->mg_ptr, FALSE);
+	    }
+	}
+
+	mgprev = nmg;
+    }
+    return mgret;
 }
 
 /* duplicate an SV of any type (including AV, HV etc) */
 
-static SV *
-clone_sv(SV *sstr, PTABLE_t *ptable)
-{
-	SV * dstr;
+static SV * clone_sv(pTHX_ SV *src, I32 cache) {
+    SV * dest;
 
-	/* CLONE_DEBUG("inside clone_sv\n"); */
-	if (!sstr || SvTYPE(sstr) == SVTYPEMASK)
-		return Nullsv;
+    if (!src || SvTYPE(src) == SVTYPEMASK) {
+	return Nullsv;
+    }
 
-	/* look for it in the table first */
-	dstr = (SV*)PTABLE_fetch(ptable, sstr);
-
-	if (dstr)
-		return dstr;
-
-	switch (SvTYPE(sstr)) {
-		case SVt_NULL:
-			/* CLONE_DEBUG("    detected type: %s (NULL)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			break;
-		case SVt_IV:
-			/* CLONE_DEBUG("    detected type: %s (IV)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			SvIVX(dstr) = SvIVX(sstr);
-			break;
-		case SVt_NV:
-			/* CLONE_DEBUG("    detected type: %s (NV)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			SvNVX(dstr) = SvNVX(sstr);
-			break;
-		case SVt_RV:
-			/* CLONE_DEBUG("    detected type: %s (RV)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			clone_rvpv(sstr, dstr, ptable);
-			break;
-		case SVt_PV:
-			/* CLONE_DEBUG("    detected type: %s (PV)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			SvCUR(dstr)     = SvCUR(sstr);
-			SvLEN(dstr)     = SvLEN(sstr);
-			clone_rvpv(sstr, dstr, ptable);
-			break;
-		case SVt_PVIV:
-			/* CLONE_DEBUG("    detected type: %s (PVIV)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			SvCUR(dstr)	= SvCUR(sstr);
-			SvLEN(dstr)	= SvLEN(sstr);
-			SvIVX(dstr)	= SvIVX(sstr);
-			clone_rvpv(sstr, dstr, ptable);
-			break;
-		case SVt_PVNV:
-			/* CLONE_DEBUG("    detected type: %s (PVNV)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			SvCUR(dstr)	= SvCUR(sstr);
-			SvLEN(dstr)	= SvLEN(sstr);
-			SvIVX(dstr)	= SvIVX(sstr);
-			SvNVX(dstr)	= SvNVX(sstr);
-			clone_rvpv(sstr, dstr, ptable);
-			break;
-		case SVt_PVMG:
-			/* CLONE_DEBUG("    detected type: %s (PVMG)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			SvCUR(dstr)	= SvCUR(sstr);
-			SvLEN(dstr)	= SvLEN(sstr);
-			SvIVX(dstr)	= SvIVX(sstr);
-			SvNVX(dstr)	= SvNVX(sstr);
-			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptable);
-			CLONE_COPY_STASH(sstr, dstr);
-			clone_rvpv(sstr, dstr, ptable);
-			break;
-		case SVt_PVBM:
-			/* CLONE_DEBUG("    detected type: %s (PVBM)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			SvCUR(dstr)	= SvCUR(sstr);
-			SvLEN(dstr)	= SvLEN(sstr);
-			SvIVX(dstr)	= SvIVX(sstr);
-			SvNVX(dstr)	= SvNVX(sstr);
-			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptable);
-			CLONE_COPY_STASH(sstr, dstr);
-			clone_rvpv(sstr, dstr, ptable);
-			BmRARE(dstr) = BmRARE(sstr);
-			BmUSEFUL(dstr) = BmUSEFUL(sstr);
-			BmPREVIOUS(dstr) = BmPREVIOUS(sstr);
-			break;
-		case SVt_PVLV:
-			/* CLONE_DEBUG("    detected type: %s (PVLV)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			SvCUR(dstr) = SvCUR(sstr);
-			SvLEN(dstr) = SvLEN(sstr);
-			SvIVX(dstr) = SvIVX(sstr);
-			SvNVX(dstr) = SvNVX(sstr);
-			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptable);
-			CLONE_COPY_STASH(sstr, dstr);
-			clone_rvpv(sstr, dstr, ptable);
-			LvTARGOFF(dstr) = LvTARGOFF(sstr); /* XXX sometimes holds PMOP* when DEBUGGING */
-			LvTARGLEN(dstr) = LvTARGLEN(sstr);
-			if (LvTYPE(sstr) == 't') { /* for tie: unrefcnted fake (SV**) */
-				LvTARG(dstr) = dstr;
-			} else if (LvTYPE(sstr) == 'T') { /* for tie: fake HE */
-				LvTARG(dstr) = (SV*)clone_he((HE*)LvTARG(sstr), 0, ptable);
-			} else {
-				LvTARG(dstr) = clone_sv_inc(LvTARG(sstr), ptable);
-			}
-			LvTYPE(dstr) = LvTYPE(sstr);
-			break;
-		case SVt_PVGV:
-			/* CLONE_DEBUG("    detected type: %s (PVGV)\n", sv_reftype(sstr, 0)); */
-			CLONE_PASS_THRU(sstr, dstr, ptable);
-			break;
-		case SVt_PVIO:
-			/* CLONE_DEBUG("    detected type: %s (PVIO)\n", sv_reftype(sstr, 0)); */
-			CLONE_PASS_THRU(sstr, dstr, ptable);
-			break;
-		case SVt_PVAV:
-			/* CLONE_DEBUG("    detected type: %s (PVAV)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			SvCUR(dstr)	= SvCUR(sstr);
-			SvLEN(dstr)	= SvLEN(sstr);
-			SvIVX(dstr)	= SvIVX(sstr);
-			SvNVX(dstr)	= SvNVX(sstr);
-			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptable);
-			CLONE_COPY_STASH(sstr, dstr);
-			AvARYLEN((AV*)dstr) = clone_sv_inc(AvARYLEN((AV*)sstr), ptable);
-			AvFLAGS((AV*)dstr) = AvFLAGS((AV*)sstr);
-
-			if (AvARRAY((AV*)sstr)) {
-				SV **dst_ary, **src_ary;
-				SSize_t items = AvFILLp((AV*)sstr) + 1;
-
-				src_ary = AvARRAY((AV*)sstr);
-				Newz(0, dst_ary, AvMAX((AV*)sstr)+1, SV*);
-				PTABLE_store(ptable, src_ary, dst_ary);
-				SvPVX(dstr) = (char*)dst_ary;
-				AvALLOC((AV*)dstr) = dst_ary;
-				if (AvREAL((AV*)sstr)) {
-					while (items-- > 0)
-						*dst_ary++ = clone_sv_inc(*src_ary++, ptable);
-				} else {
-					while (items-- > 0)
-						*dst_ary++ = clone_sv(*src_ary++, ptable);
-				}
-				items = AvMAX((AV*)sstr) - AvFILLp((AV*)sstr);
-				while (items-- > 0) {
-					*dst_ary++ = &PL_sv_undef;
-				}
-			} else {
-				SvPVX(dstr)		= Nullch;
-				AvALLOC((AV*)dstr)	= (SV**)NULL;
-			}
-			break;
-		case SVt_PVHV:
-			/* CLONE_DEBUG("    detected type: %s (PVHV)\n", sv_reftype(sstr, 0)); */
-			CLONE_NEW_SV(sstr, dstr, ptable);
-			SvCUR(dstr) = SvCUR(sstr);
-			SvLEN(dstr) = SvLEN(sstr);
-			SvIVX(dstr) = SvIVX(sstr);
-			SvNVX(dstr) = SvNVX(sstr);
-			SvMAGIC(dstr) = clone_mg(SvMAGIC(sstr), ptable);
-			CLONE_COPY_STASH(sstr, dstr);
-			HvRITER((HV*)dstr) = HvRITER((HV*)sstr);
-			if (HvARRAY((HV*)sstr)) {
-				STRLEN i = 0;
-				XPVHV *dxhv = (XPVHV*)SvANY(dstr);
-				XPVHV *sxhv = (XPVHV*)SvANY(sstr);
-				Newz(0, dxhv->xhv_array, PERL_HV_ARRAY_ALLOC_BYTES(dxhv->xhv_max+1), char);
-
-				while (i <= sxhv->xhv_max) {
-					((HE**)dxhv->xhv_array)[i] = clone_he(((HE**)sxhv->xhv_array)[i], (bool)!!HvSHAREKEYS(sstr), ptable);
-					++i;
-				}
-
-				dxhv->xhv_eiter = clone_he(sxhv->xhv_eiter, (bool)!!HvSHAREKEYS(sstr), ptable);
-			}
-			
-			/* set by sv_upgrade
-			else {
-				SvPVX(dstr) = Nullch; 
-				HvEITER((HV*)dstr) = (HE*)NULL;
-			}
-			*/
-			HvPMROOT((HV*)dstr) = HvPMROOT((HV*)sstr); /* XXX */
-			HvNAME((HV*)dstr) = SAVEPV(HvNAME((HV*)sstr));
-			/* Record stashes for possible cloning in Perl_clone(). */
-			/* if(HvNAME((HV*)dstr))
-				av_push(param->stashes, dstr);
-			*/
-			break;
-		case SVt_PVFM:
-			/* CLONE_DEBUG("    detected type: %s (PVFM)\n", sv_reftype(sstr, 0)); */
-		case SVt_PVCV:
-			/* CLONE_DEBUG("    detected type: %s (PVCV)\n", sv_reftype(sstr, 0)); */
-			CLONE_PASS_THRU(sstr, dstr, ptable);
-			break;
-		default:
-			Perl_croak(aTHX_ "Bizarre SvTYPE [%" IVdf "]", (IV)SvTYPE(sstr));
-			break;
+    /* weakref magic is actually attached to the referent rather than the reference */
+    if (!cache) {
+	/* chocolateboy: don't involve the cache if the refcnt < 2 unless forced */
+	if ((SvREFCNT(src) > 1) || (SvROK(src) && SvWEAKREF(src)) || (SvMAGICAL(src) && mg_find(src, WEAKREF_IDENTIFIER))) {
+	    cache = 1;
 	}
+    }
 
-	if (SvOBJECT(dstr) && SvTYPE(dstr) != SVt_PVIO)
-		++PL_sv_objcount;
+    /* warn ("cache: %d, refcnt: %d, weakref: %d", cache, SvREFCNT(src), is_weakref); */
+    /* look for it in the cache first */
+    if (cache) {
+	dest = (SV*)PTABLE_fetch(PTABLE, src);
 
-	return dstr;
+	if (dest) {
+	    return dest;
+	}
+    }
+
+    dest = newSV(0);
+
+    /* don't propagate OOK hack or context-specific flags */
+
+    /*
+        chocolateboy
+        
+        SVpad_OUR conflicts with SvWEAKREF, so we can't turn that off:
+
+            SvFLAGS(dest) &= ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVs_TEMP | SVpad_OUR);
+
+	also note: we can't factor out the flag copying (by placing it here) because the flags
+	influence SvUPGRADE
+    */      
+
+    SvREFCNT(dest) = 0;
+
+    if (cache) {
+	PTABLE_store(PTABLE, src, dest);
+    }
+
+    switch (SvTYPE(src)) {
+	case SVt_NULL:
+	    /* warn("SVt_NULL"); */
+	    /* FIXME: already null */
+	    (void)SvUPGRADE(dest, SVt_NULL);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    break;
+	case SVt_IV:
+	    /* warn("SVt_IV"); */
+	    (void)SvUPGRADE(dest, SVt_IV);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    SvIVX(dest) = SvIVX(src);
+	    break;
+	case SVt_NV:
+	    /* warn("SVt_NV"); */
+	    (void)SvUPGRADE(dest, SVt_NV);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    SvNVX(dest) = SvNVX(src);
+	    break;
+	case SVt_RV:
+	    /* warn("SVt_RV"); */
+	    (void)SvUPGRADE(dest, SVt_RV);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    CLONE_RVPV(src, dest);
+	    break;
+	case SVt_PV:
+	    /* warn("SVt_PV"); */
+	    (void)SvUPGRADE(dest, SVt_PV);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    SvCUR(dest)     = SvCUR(src);
+	    SvLEN(dest)     = SvLEN(src);
+	    CLONE_RVPV(src, dest);
+	    break;
+	case SVt_PVIV:
+	    /* warn("SVt_PVIV"); */
+	    (void)SvUPGRADE(dest, SVt_PVIV);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    SvCUR(dest)	= SvCUR(src);
+	    SvLEN(dest)	= SvLEN(src);
+	    SvIVX(dest)	= SvIVX(src);
+	    CLONE_RVPV(src, dest);
+	    break;
+	case SVt_PVNV:
+	    /* warn("SVt_PVNV"); */
+	    (void)SvUPGRADE(dest, SVt_PVNV);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    SvCUR(dest)	= SvCUR(src);
+	    SvLEN(dest)	= SvLEN(src);
+	    SvIVX(dest)	= SvIVX(src);
+	    SvNVX(dest)	= SvNVX(src);
+	    CLONE_RVPV(src, dest);
+	    break;
+	case SVt_PVMG:
+	    /* warn("SVt_PVMG"); */
+	    {
+		/* FIXME: mg_find */
+		MAGIC *mg = SvMAGIC(src);
+
+		if (mg && mg->mg_type == PERL_MAGIC_qr) {
+		    sv_clear(dest);
+		    return src;
+		}
+	    }
+
+	    (void)SvUPGRADE(dest, SVt_PVMG);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    SvCUR(dest)	= SvCUR(src);
+	    SvLEN(dest)	= SvLEN(src);
+	    SvIVX(dest)	= SvIVX(src);
+	    SvNVX(dest)	= SvNVX(src);
+	    SvMAGIC(dest) = clone_mg(aTHX_ SvMAGIC(src));
+	    CLONE_COPY_STASH(src, dest);
+	    CLONE_RVPV(src, dest);
+	    break;
+	case SVt_PVBM:
+	    /* warn("SVt_PVBM"); */
+	    (void)SvUPGRADE(dest, SVt_PVBM);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    SvCUR(dest)	= SvCUR(src);
+	    SvLEN(dest)	= SvLEN(src);
+	    SvIVX(dest)	= SvIVX(src);
+	    SvNVX(dest)	= SvNVX(src);
+	    SvMAGIC(dest) = clone_mg(aTHX_ SvMAGIC(src));
+	    CLONE_COPY_STASH(src, dest);
+	    CLONE_RVPV(src, dest);
+	    BmRARE(dest) = BmRARE(src);
+	    BmUSEFUL(dest) = BmUSEFUL(src);
+	    BmPREVIOUS(dest) = BmPREVIOUS(src);
+	    break;
+	case SVt_PVLV:
+	    /* warn("SVt_PVLV"); */
+	    (void)SvUPGRADE(dest, SVt_PVLV);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    SvCUR(dest) = SvCUR(src);
+	    SvLEN(dest) = SvLEN(src);
+	    SvIVX(dest) = SvIVX(src);
+	    SvNVX(dest) = SvNVX(src);
+	    SvMAGIC(dest) = clone_mg(aTHX_ SvMAGIC(src));
+	    CLONE_COPY_STASH(src, dest);
+	    CLONE_RVPV(src, dest);
+	    LvTARGOFF(dest) = LvTARGOFF(src); /* XXX sometimes holds PMOP* when DEBUGGING */
+	    LvTARGLEN(dest) = LvTARGLEN(src);
+	    if (LvTYPE(src) == 't') { /* for tie: unrefcnted fake (SV**) */
+		LvTARG(dest) = dest;
+	    } else if (LvTYPE(src) == 'T') { /* for tie: fake HE */
+		LvTARG(dest) = LvTARG(src) ? (SV*)clone_he(aTHX_ (HE*)LvTARG(src), 0) : (SV*)Nullhe;
+	    } else {
+		LvTARG(dest) = clone_sv_inc(LvTARG(src), FALSE);
+	    }
+	    LvTYPE(dest) = LvTYPE(src);
+	    break;
+	case SVt_PVAV:
+	    /* warn("SVt_PVAV"); */
+	    (void)SvUPGRADE(dest, SVt_PVAV);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    SvCUR(dest)	= SvCUR(src);
+	    SvLEN(dest)	= SvLEN(src);
+	    SvIVX(dest)	= SvIVX(src);
+	    SvNVX(dest)	= SvNVX(src);
+	    SvMAGIC(dest) = clone_mg(aTHX_ SvMAGIC(src));
+	    CLONE_COPY_STASH(src, dest);
+	    AvARYLEN((AV*)dest) = clone_sv_inc(AvARYLEN((AV*)src), FALSE);
+	    AvFLAGS((AV*)dest) = AvFLAGS((AV*)src);
+
+	    if (AvARRAY((AV*)src)) {
+		SV **dst_ary, **src_ary;
+		SSize_t items = AvFILLp((AV*)src) + 1;
+
+		src_ary = AvARRAY((AV*)src);
+		Newxz(dst_ary, AvMAX((AV*)src)+1, SV*);
+		PTABLE_store(PTABLE, src_ary, dst_ary); /* XXX */
+		SvPVX(dest) = (char*)dst_ary;
+		AvALLOC((AV*)dest) = dst_ary;
+		if (AvREAL((AV*)src)) {
+		    while (items-- > 0)
+			*dst_ary++ = clone_sv_inc(*src_ary++, FALSE);
+		} else {
+		    while (items-- > 0)
+			*dst_ary++ = clone_sv(aTHX_ *src_ary++, FALSE);
+		}
+		items = AvMAX((AV*)src) - AvFILLp((AV*)src);
+		while (items-- > 0) {
+		    *dst_ary++ = &PL_sv_undef;
+		}
+	    } else {
+		SvPVX(dest)		= Nullch;
+		AvALLOC((AV*)dest)	= (SV**)NULL;
+	    }
+	    if (SvMAGICAL(src)) {
+		assert(SvMAGICAL(dest));
+	    }
+	    break;
+	case SVt_PVHV:
+	    /* warn("SVt_PVHV"); */
+	    (void)SvUPGRADE(dest, SVt_PVHV);
+	    SvFLAGS(dest) = SvFLAGS(src) & ~(SVs_PADBUSY | SVs_PADTMP | SVs_PADMY | SVf_OOK);
+	    SvCUR(dest) = SvCUR(src);
+	    SvLEN(dest) = SvLEN(src);
+	    SvIVX(dest) = SvIVX(src);
+	    SvNVX(dest) = SvNVX(src);
+	    SvMAGIC(dest) = clone_mg(aTHX_ SvMAGIC(src));
+	    CLONE_COPY_STASH(src, dest);
+	    HvRITER((HV*)dest) = HvRITER((HV*)src);
+	    if (HvARRAY((HV*)src)) {
+		STRLEN i = 0;
+		XPVHV *dxhv = (XPVHV*)SvANY(dest);
+		XPVHV *sxhv = (XPVHV*)SvANY(src);
+		Newxz(dxhv->xhv_array, PERL_HV_ARRAY_ALLOC_BYTES(dxhv->xhv_max+1), char);
+
+		while (i <= sxhv->xhv_max) {
+		    HE* he = ((HE**)sxhv->xhv_array)[i];
+		    ((HE**)dxhv->xhv_array)[i] =
+			he ? clone_he(aTHX_ he, (bool)!!HvSHAREKEYS(src)) : Nullhe;
+		    ++i;
+		}
+
+		dxhv->xhv_eiter = sxhv->xhv_eiter ?
+		    clone_he(aTHX_ sxhv->xhv_eiter, (bool)!!HvSHAREKEYS(src)) :
+		    Nullhe;
+	    }
+
+	    /* 
+	       chocolateboy
+
+	       set by sv_upgrade
+
+	       else {
+	       SvPVX(dest) = Nullch; 
+	       HvEITER((HV*)dest) = (HE*)NULL;
+	       }
+	     */
+	    HvPMROOT((HV*)dest) = HvPMROOT((HV*)src); /* XXX */
+	    HvNAME((HV*)dest) = SAVEPV(HvNAME((HV*)src));
+	    /* Record stashes for possible cloning in Perl_clone(). */
+	    /*
+	      chocolateboy
+
+	      if(HvNAME((HV*)dest))
+	       av_push(param->stashes, dest);
+	     */
+	    break;
+	case SVt_PVFM:
+	case SVt_PVCV:
+	case SVt_PVGV:
+	case SVt_PVIO:
+	    /* warn("SVt_PVFM or SVt_PVCV or SVt_PVGV or SVt_PVIO"); */
+	    sv_clear(dest);
+	    return src;
+	    break;
+	default:
+	    Perl_croak(aTHX_ "Bizarre SvTYPE [%" IVdf "]", (IV)SvTYPE(src));
+	    break;
+    }
+
+    if (SvOBJECT(dest) && (SvTYPE(dest) != SVt_PVIO))
+	++PL_sv_objcount;
+
+    return dest;
 }
 
 MODULE = Scalar::Util::Clone		PACKAGE = Scalar::Util::Clone
 
 PROTOTYPES: ENABLE
 
+BOOT:
+PTABLE = PTABLE_new();
+if (!PTABLE) croak ("Can't initialize pointer table (PTABLE)");
+
+void
+END()
+    PROTOTYPE:
+    CODE:
+	PTABLE_free(PTABLE);
+
 void
 clone(original)
     SV *original
     PROTOTYPE: $
     PREINIT:
-    SV *clone = &PL_sv_undef;
-    PTABLE_t *ptable = NULL;
+	SV *clone;
     PPCODE:
+	clone = clone_sv(aTHX_ original, FALSE);
+	PTABLE_clear(PTABLE);
 
-	/* CLONE_DEBUG("\n"); */
-    ptable = PTABLE_new(); 
-    clone = clone_sv(original, ptable);
-    PTABLE_free(ptable);
-    ptable = NULL;
-
-    EXTEND(SP,1);
-    PUSHs(sv_2mortal(SvREFCNT_inc(clone)));
-
-void
-supports_weakrefs()
-    PROTOTYPE:
-    CODE:
-#ifdef SvWEAKREF
-    XSRETURN(1);
-#else
-    XSRETURN(0);
-#endif
+	EXTEND(SP,1);
+	PUSHs(sv_2mortal(SvREFCNT_inc(clone)));

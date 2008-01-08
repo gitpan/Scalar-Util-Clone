@@ -1,13 +1,11 @@
-#!perl
-
 use strict;
 use warnings;
+use blib;
 
-use Test::More tests => 13;
+use Test::More tests => 12;
+use Scalar::Util::Clone qw(clone);
 
 $| = 1;
-
-use_ok ('Scalar::Util::Clone', qw(clone));
 
 is (undef, clone (undef));
 is (0, clone (0));
